@@ -16,7 +16,9 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "tailwind-merge": "^3.3.1",
-    "piexifjs": "^1.0.6"
+    "piexifjs": "^1.0.6",
+    "tesseract.js": "^5.1.0",
+    "zustand": "^4.5.2"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

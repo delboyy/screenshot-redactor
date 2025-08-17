@@ -30,6 +30,7 @@ export function UploadDropzone({ className }: UploadDropzoneProps) {
           const dataUrl = typeof reader.result === "string" ? reader.result : "";
           if (dataUrl) {
             sessionStorage.setItem("sr:imageDataURL", dataUrl);
+            sessionStorage.setItem("sr:filename", file.name || "screenshot.png");
             router.push("/redact");
           }
         } catch (err) {

@@ -32,6 +32,7 @@ export default function ManualRedactor() {
   const [stripExif, setStripExif] = React.useState(true);
   const [minConfidence, setMinConfidence] = React.useState(65);
   const [autoMode, setAutoMode] = React.useState<RedactionTool>("blackout");
+  const [autoDetectEnabled, setAutoDetectEnabled] = React.useState(true);
 
   const undoStack = React.useRef<ImageData[]>([]);
   const redoStack = React.useRef<ImageData[]>([]);
@@ -98,6 +99,75 @@ export default function ManualRedactor() {
     drawOverlay(null);
   }, [pushUndoSnapshot]);
 
+  // OCR integration (define before effects to satisfy hook dependencies)
+  const runOcrAsync = React.useCallback(async () => {
+    if (!autoDetectEnabled) {
+      if (overlayDivRef.current) overlayDivRef.current.innerHTML = "";
+      return;
+    }
+    try {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const pass1 = pipelineBasic(canvas);
+      const pass2 = pipelineHighContrast(canvas);
+      const dataUrl1 = pass1.canvas.toDataURL("image/png");
+      const dataUrl2 = pass2.canvas.toDataURL("image/png");
+
+      const WorkerCtor = await (async () => {
+        const mod = new URL("../../workers/ocrWorker.ts", import.meta.url);
+        return new Worker(mod, { type: "module" });
+      })();
+
+      await new Promise<void>((resolve, reject) => {
+        const onMessage = (ev: MessageEvent) => {
+          if (ev.data?.type === "ready") {
+            WorkerCtor.removeEventListener("message", onMessage);
+            resolve();
+          }
+        };
+        WorkerCtor.addEventListener("message", onMessage);
+        WorkerCtor.postMessage({ type: "init" });
+        setTimeout(() => reject(new Error("OCR init timeout")), 10000);
+      });
+
+      const runOnce = (payloadUrl: string) => new Promise<{ ocr: { width: number; height: number; scaleX: number; scaleY: number; lines: Array<{ words: Array<{ text: string; conf: number; bbox: { x: number; y: number; w: number; h: number } }>; joined: string; spans: { start: number; end: number; wordIdx: number }[]; meanCharWidth: number }> } }>((resolve, reject) => {
+        const onMessage = (ev: MessageEvent) => {
+          if (ev.data?.type === "result") {
+            WorkerCtor.removeEventListener("message", onMessage);
+            resolve(ev.data.payload);
+          } else if (ev.data?.type === "error") {
+            WorkerCtor.removeEventListener("message", onMessage);
+            reject(new Error(ev.data.payload.message));
+          }
+        };
+        WorkerCtor.addEventListener("message", onMessage);
+        WorkerCtor.postMessage({ type: "run", payload: { imageBitmapDataURL: payloadUrl } });
+      });
+
+      let payload = await runOnce(dataUrl1);
+      if (!payload || payload.ocr.lines.length < 1) {
+        payload = await runOnce(dataUrl2);
+      }
+
+      const detectionsMapped = processOcrForDetections(payload.ocr, minConfidence);
+      const candidates = detectionsMapped.map(d => ({
+        id: d.id,
+        type: d.type,
+        text: d.text,
+        confidence: d.confidence,
+        bbox: { x0: d.bbox.x0, y0: d.bbox.y0, x1: d.bbox.x1, y1: d.bbox.y1 },
+      }));
+      lastCandidatesRef.current = candidates;
+      setDetections(detectionsMapped);
+      renderOverlayBoxes(detectionsMapped);
+
+      WorkerCtor.terminate();
+    } catch (err) {
+      console.warn("OCR error:", err);
+    }
+  }, [setDetections, minConfidence, autoDetectEnabled, renderOverlayBoxes]);
+
+  // Load image and optionally run OCR
   React.useEffect(() => {
     const dataUrl = sessionStorage.getItem("sr:imageDataURL");
     if (!dataUrl) {
@@ -108,14 +178,16 @@ export default function ManualRedactor() {
     imageRef.current = img;
     img.onload = () => {
       initializeCanvasWithImage(img);
-      // Kick off OCR on downscaled bitmap
-      runOcrAsync();
+      if (autoDetectEnabled) {
+        runOcrAsync();
+      }
     };
     img.onerror = () => setError("Failed to load image.");
     img.src = dataUrl;
-    // Clean redo on fresh load
     redoStack.current = [];
-  }, [initializeCanvasWithImage]);
+  }, [initializeCanvasWithImage, runOcrAsync, autoDetectEnabled]);
+
+  
 
   
 
@@ -213,77 +285,7 @@ export default function ManualRedactor() {
     ctx.restore();
   };
 
-  // OCR integration
-  const runOcrAsync = React.useCallback(async () => {
-    try {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      // Preprocess with two pipelines; try basic first, then high-contrast
-      const pass1 = pipelineBasic(canvas);
-      const pass2 = pipelineHighContrast(canvas);
-      const dataUrl1 = pass1.canvas.toDataURL("image/png");
-      const dataUrl2 = pass2.canvas.toDataURL("image/png");
-
-      const WorkerCtor = await (async () => {
-        // Using new Worker with module
-        const mod = new URL("../../workers/ocrWorker.ts", import.meta.url);
-        return new Worker(mod, { type: "module" });
-      })();
-
-      await new Promise<void>((resolve, reject) => {
-        const onMessage = (ev: MessageEvent) => {
-          if (ev.data?.type === "ready") {
-            WorkerCtor.removeEventListener("message", onMessage);
-            resolve();
-          }
-        };
-        WorkerCtor.addEventListener("message", onMessage);
-        WorkerCtor.postMessage({ type: "init" });
-        setTimeout(() => reject(new Error("OCR init timeout")), 10000);
-      });
-
-      const runOnce = (payloadUrl: string) => new Promise<{ ocr: { width: number; height: number; scaleX: number; scaleY: number; lines: Array<{ words: Array<{ text: string; conf: number; bbox: { x: number; y: number; w: number; h: number } }>; joined: string; spans: { start: number; end: number; wordIdx: number }[]; meanCharWidth: number }> } }>((resolve, reject) => {
-        const onMessage = (ev: MessageEvent) => {
-          if (ev.data?.type === "result") {
-            WorkerCtor.removeEventListener("message", onMessage);
-            resolve(ev.data.payload);
-          } else if (ev.data?.type === "error") {
-            WorkerCtor.removeEventListener("message", onMessage);
-            reject(new Error(ev.data.payload.message));
-          }
-        };
-        WorkerCtor.addEventListener("message", onMessage);
-        WorkerCtor.postMessage({ type: "run", payload: { imageBitmapDataURL: payloadUrl } });
-      });
-
-      let payload = await runOnce(dataUrl1);
-      // If few or no words, try the second pass
-      if (!payload || payload.ocr.lines.length < 1) {
-        payload = await runOnce(dataUrl2);
-      }
-
-      // Line-aware detection based on worker OCR space; map to full-res using returned scales
-      const scaleX = payload.ocr.scaleX;
-      const scaleY = payload.ocr.scaleY;
-      // NEW CODE (using the enhanced detection):
-      const detectionsMapped = processOcrForDetections(payload.ocr, minConfidence);
-      const candidates = detectionsMapped.map(d => ({
-       id: d.id,
-       type: d.type,
-       text: d.text,
-       confidence: d.confidence,
-       bbox: { x0: d.bbox.x0, y0: d.bbox.y0, x1: d.bbox.x1, y1: d.bbox.y1 },
-      }));
-lastCandidatesRef.current = candidates;
-setDetections(detectionsMapped);
-      // Render suggestion overlays as HTML boxes layered above
-      renderOverlayBoxes(detectionsMapped);
-
-      WorkerCtor.terminate();
-    } catch (err) {
-      console.warn("OCR error:", err);
-    }
-  }, [setDetections, minConfidence]);
+  // OCR integration (placed before effects to satisfy hook dependencies)
 
   // Build detections per line using whitespace-tolerant regex and word span mapping
   function buildLineDetectionsFromOcr(
@@ -382,6 +384,21 @@ setDetections(detectionsMapped);
     renderOverlayBoxes(filtered);
   }, [zoom, minConfidence]);
 
+  // React to auto-detect toggle: clear overlays when disabled; when enabled, re-render or run OCR
+  React.useEffect(() => {
+    const canvasEl = canvasRef.current;
+    if (!canvasEl) return;
+    if (!autoDetectEnabled) {
+      if (overlayDivRef.current) overlayDivRef.current.innerHTML = "";
+      return;
+    }
+    const filtered = filterDetections(lastCandidatesRef.current, canvasEl, minConfidence);
+    renderOverlayBoxes(filtered);
+    if (lastCandidatesRef.current.length === 0) {
+      runOcrAsync();
+    }
+  }, [autoDetectEnabled, minConfidence, runOcrAsync]);
+
   function filterDetections(
     items: Array<{
       id: string;
@@ -438,7 +455,11 @@ setDetections(detectionsMapped);
     const overlayDiv = overlayDivRef.current;
     const canvasEl = canvasRef.current;
     if (!(overlayDiv && canvasEl)) return;
-    
+    // If auto-detect is disabled, ensure overlay is cleared and skip drawing
+    if (!autoDetectEnabled) {
+      overlayDiv.innerHTML = "";
+      return;
+    }
     // Clear existing boxes efficiently
     overlayDiv.innerHTML = "";
     
@@ -782,6 +803,15 @@ setDetections(detectionsMapped);
                 Redo
               </button>
               <div className="ml-2 hidden items-center gap-2 md:flex">
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={autoDetectEnabled}
+                    onChange={(e) => setAutoDetectEnabled(e.target.checked)}
+                  />
+                  Auto Detect
+                </label>
                 <label className="text-xs text-muted-foreground">Min conf</label>
                 <input
                   type="range"

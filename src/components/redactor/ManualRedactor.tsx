@@ -3,10 +3,8 @@
 import React from "react";
 import Link from "next/link";
 import { useDetections } from "@/store/detections";
-import { pipelineBasic, pipelineHighContrast } from "@/lib/imagePreprocess";
-import { luhnOk, ipv4Ok } from "@/lib/pii";
 import DetectionPanel from "@/components/redactor/DetectionPanel";
-import { processOcrForDetections } from "@/lib/enhanced_detection";
+import { detectBoxesFromCanvas, disposeDetectorWorker } from "@/lib/ocr/detectorClient";
 
 type RedactionTool = "blackout" | "blur" | "pixelate";
 
@@ -32,7 +30,7 @@ export default function ManualRedactor() {
   const [stripExif, setStripExif] = React.useState(true);
   const [minConfidence, setMinConfidence] = React.useState(65);
   const [autoMode, setAutoMode] = React.useState<RedactionTool>("blackout");
-  const [autoDetectEnabled, setAutoDetectEnabled] = React.useState(true);
+  const [autoDetectEnabled, setAutoDetectEnabled] = React.useState(false);
 
   const undoStack = React.useRef<ImageData[]>([]);
   const redoStack = React.useRef<ImageData[]>([]);
@@ -46,6 +44,7 @@ export default function ManualRedactor() {
     bbox: { x0: number; y0: number; x1: number; y1: number };
   };
   const lastCandidatesRef = React.useRef<Candidate[]>([]);
+  const ocrRunningRef = React.useRef(false);
 
   const get2d = (c: HTMLCanvasElement | null) => c?.getContext("2d") || null;
 
@@ -63,6 +62,95 @@ export default function ManualRedactor() {
     }
   }, []);
 
+  // Memoized overlay renderer to avoid re-creation
+  const renderOverlayBoxes = React.useCallback((detections: Array<{ bbox: { x0: number; y0: number; x1: number; y1: number }, type: string, text: string }>) => {
+    const overlayDiv = overlayDivRef.current;
+    const canvasEl = canvasRef.current;
+    if (!(overlayDiv && canvasEl)) return;
+    if (!autoDetectEnabled) {
+      overlayDiv.innerHTML = "";
+      return;
+    }
+    overlayDiv.innerHTML = "";
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const scaleX = (canvasRect.width / canvasEl.width) * zoom;
+    const scaleY = (canvasRect.height / canvasEl.height) * zoom;
+    const fragment = document.createDocumentFragment();
+    detections.forEach((det) => {
+      const d = document.createElement("div");
+      d.style.position = "absolute";
+      d.style.left = `${det.bbox.x0 * scaleX}px`;
+      d.style.top = `${det.bbox.y0 * scaleY}px`;
+      d.style.width = `${(det.bbox.x1 - det.bbox.x0) * scaleX}px`;
+      d.style.height = `${(det.bbox.y1 - det.bbox.y0) * scaleY}px`;
+      d.style.border = "2px solid #22c55e";
+      d.style.background = "rgba(34,197,94,0.1)";
+      d.style.borderRadius = "4px";
+      d.style.pointerEvents = "none";
+      d.style.zIndex = "10";
+      d.title = `${det.type}: ${det.text}`;
+      fragment.appendChild(d);
+    });
+    overlayDiv.appendChild(fragment);
+  }, [zoom, autoDetectEnabled]);
+
+  // OCR/detector integration (boxes-only, via worker)
+  const runOcrAsync = React.useCallback(async () => {
+    if (!autoDetectEnabled) {
+      if (overlayDivRef.current) overlayDivRef.current.innerHTML = "";
+      return;
+    }
+    if (ocrRunningRef.current) return;
+    ocrRunningRef.current = true;
+
+    // Show loading state
+    const overlayDiv = overlayDivRef.current;
+    if (overlayDiv) {
+      overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20;">Detecting boxes…</div>';
+    }
+
+    try {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      // Use the current canvas directly to avoid expensive dataURL roundtrips
+      const boxes = await detectBoxesFromCanvas(canvas);
+
+      // Map polygons to axis-aligned boxes for overlay
+      const detections = boxes.map((poly, idx) => {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (let i = 0; i < poly.length; i += 2) {
+          const x = poly[i];
+          const y = poly[i + 1];
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+        return {
+          id: `box-${idx}`,
+          type: "auto",
+          text: "",
+          confidence: 80,
+          bbox: { x0: minX, y0: minY, x1: maxX, y1: maxY },
+        };
+      });
+
+      lastCandidatesRef.current = detections;
+      setDetections(detections);
+      renderOverlayBoxes(detections);
+    } catch (err) {
+      console.warn("Detector error:", err);
+      if (overlayDiv) {
+        overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(239, 68, 68, 0.9); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20; cursor: pointer;" onclick="this.remove()">Auto-detection failed. Click to dismiss and use manual tools.</div>';
+      }
+      setAutoDetectEnabled(false);
+    } finally {
+      ocrRunningRef.current = false;
+    }
+  }, [autoDetectEnabled, renderOverlayBoxes, setDetections]);
+
+  // Initialize canvas with image
   const initializeCanvasWithImage = React.useCallback((img: HTMLImageElement) => {
     const canvas = canvasRef.current;
     const overlay = overlayRef.current;
@@ -89,83 +177,14 @@ export default function ManualRedactor() {
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    // Draw in device pixels to align with selection and overlay
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-    // Seed undo history with initial state
     pushUndoSnapshot();
-    drawOverlay(null);
+    // clear selection overlay
+    const octx = overlay.getContext("2d");
+    octx?.clearRect(0, 0, overlay.width, overlay.height);
   }, [pushUndoSnapshot]);
-
-  // OCR integration (define before effects to satisfy hook dependencies)
-  const runOcrAsync = React.useCallback(async () => {
-    if (!autoDetectEnabled) {
-      if (overlayDivRef.current) overlayDivRef.current.innerHTML = "";
-      return;
-    }
-    try {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const pass1 = pipelineBasic(canvas);
-      const pass2 = pipelineHighContrast(canvas);
-      const dataUrl1 = pass1.canvas.toDataURL("image/png");
-      const dataUrl2 = pass2.canvas.toDataURL("image/png");
-
-      const WorkerCtor = await (async () => {
-        const mod = new URL("../../workers/ocrWorker.ts", import.meta.url);
-        return new Worker(mod, { type: "module" });
-      })();
-
-      await new Promise<void>((resolve, reject) => {
-        const onMessage = (ev: MessageEvent) => {
-          if (ev.data?.type === "ready") {
-            WorkerCtor.removeEventListener("message", onMessage);
-            resolve();
-          }
-        };
-        WorkerCtor.addEventListener("message", onMessage);
-        WorkerCtor.postMessage({ type: "init" });
-        setTimeout(() => reject(new Error("OCR init timeout")), 10000);
-      });
-
-      const runOnce = (payloadUrl: string) => new Promise<{ ocr: { width: number; height: number; scaleX: number; scaleY: number; lines: Array<{ words: Array<{ text: string; conf: number; bbox: { x: number; y: number; w: number; h: number } }>; joined: string; spans: { start: number; end: number; wordIdx: number }[]; meanCharWidth: number }> } }>((resolve, reject) => {
-        const onMessage = (ev: MessageEvent) => {
-          if (ev.data?.type === "result") {
-            WorkerCtor.removeEventListener("message", onMessage);
-            resolve(ev.data.payload);
-          } else if (ev.data?.type === "error") {
-            WorkerCtor.removeEventListener("message", onMessage);
-            reject(new Error(ev.data.payload.message));
-          }
-        };
-        WorkerCtor.addEventListener("message", onMessage);
-        WorkerCtor.postMessage({ type: "run", payload: { imageBitmapDataURL: payloadUrl } });
-      });
-
-      let payload = await runOnce(dataUrl1);
-      if (!payload || payload.ocr.lines.length < 1) {
-        payload = await runOnce(dataUrl2);
-      }
-
-      const detectionsMapped = processOcrForDetections(payload.ocr, minConfidence);
-      const candidates = detectionsMapped.map(d => ({
-        id: d.id,
-        type: d.type,
-        text: d.text,
-        confidence: d.confidence,
-        bbox: { x0: d.bbox.x0, y0: d.bbox.y0, x1: d.bbox.x1, y1: d.bbox.y1 },
-      }));
-      lastCandidatesRef.current = candidates;
-      setDetections(detectionsMapped);
-      renderOverlayBoxes(detectionsMapped);
-
-      WorkerCtor.terminate();
-    } catch (err) {
-      console.warn("OCR error:", err);
-    }
-  }, [setDetections, minConfidence, autoDetectEnabled, renderOverlayBoxes]);
 
   // Load image and optionally run OCR
   React.useEffect(() => {
@@ -185,6 +204,9 @@ export default function ManualRedactor() {
     img.onerror = () => setError("Failed to load image.");
     img.src = dataUrl;
     redoStack.current = [];
+    return () => {
+      try { disposeDetectorWorker(); } catch {}
+    };
   }, [initializeCanvasWithImage, runOcrAsync, autoDetectEnabled]);
 
   
@@ -285,87 +307,6 @@ export default function ManualRedactor() {
     ctx.restore();
   };
 
-  // OCR integration (placed before effects to satisfy hook dependencies)
-
-  // Build detections per line using whitespace-tolerant regex and word span mapping
-  function buildLineDetectionsFromOcr(
-    lines: Array<{ words: Array<{ text: string; conf: number; bbox: { x: number; y: number; w: number; h: number } }>; joined: string; spans: { start: number; end: number; wordIdx: number }[]; meanCharWidth: number }>
-  ) {
-    // index words by y-band (line bbox)
-    const lineDetections: Array<{ type: string; text: string; bbox: { x0: number; y0: number; x1: number; y1: number }; confidence: number }> = [];
-    for (const ln of lines) {
-      let J = ln.joined || "";
-      // normalization of lookalikes and variants
-      J = J
-        .replace(/[\uFF1A\uFE55\uA789]/g, ":") // fullwidth/variant colons
-        .replace(/[\uFF0F]/g, "/") // fullwidth slash
-        .replace(/[\uFF20]/g, "@") // fullwidth at
-        .replace(/[\u00B7\u2022\u2219]/g, ".") // middot/bullets to dot
-        .replace(/\s+/g, (m) => (m.length >= 2 ? "  " : " ")) // keep double spaces inserted by gap guard
-        .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " "); // unicode spaces to ASCII space
-
-      // at/dot variants → canonical
-      J = J.replace(/\s*(?:\(at\)|\[at\]|\{at\}|\bat\b)\s*/gi, "@");
-      J = J.replace(/\s*(?:\(dot\)|\[dot\]|\{dot\}|\bdot\b)\s*/gi, ".");
-      // regex with whitespace tolerance
-      const patterns: Array<{ type: string; re: RegExp }> = [
-        { type: "credit_card", re: /(?:\d[\s-]?){13,19}/g },
-        { type: "email", re: /[A-Za-z0-9._%+-]+\s*(?:\(at\)|\[at\]|\{at\}|@|\bat\b)\s*[A-Za-z0-9.-]+\s*(?:\(dot\)|\[dot\]|\{dot\}|\.|\bdot\b)\s*[A-Za-z]{2,}/gi },
-        { type: "url", re: /(https?)[\s]*:[\s]*\/[\s]*\/(?:[\w-]+[\s]*\.)+[\w-]{2,}(?:\/[\S]*)?/gi },
-        { type: "ipv4", re: /(\d{1,3})\s*\.\s*(\d{1,3})\s*\.\s*(\d{1,3})\s*\.\s*(\d{1,3})/g },
-        { type: "phone", re: /\+?\d[\d\s()\-]{6,}/g },
-      ];
-      for (const { type, re } of patterns) {
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(J)) !== null) {
-          const spanStart = m.index;
-          const spanEnd = m.index + m[0].length;
-          // Map span to words on this line
-          const inSpan = ln.spans
-            .filter(({ start, end }) => end > spanStart && start < spanEnd)
-            .map(({ wordIdx }) => ln.words[wordIdx]);
-          if (inSpan.length === 0) continue;
-          const text = normalizeForType(inSpan.map((w) => w.text).join(" "));
-          const bbox = unionBBoxes(inSpan.map((w) => ({ x0: w.bbox.x, y0: w.bbox.y, x1: w.bbox.x + w.bbox.w, y1: w.bbox.y + w.bbox.h })));
-          const confidence = Math.min(...inSpan.map((w) => w.conf));
-          // Sanity guard on extremely flat spans for CC/IP
-          const textHeight = bbox.y1 - bbox.y0;
-          const textWidth = bbox.x1 - bbox.x0;
-          if ((type === "credit_card" || type === "ipv4") && textWidth > 40 * Math.max(1, textHeight)) continue;
-          // strict validators and type preference handled by pattern order
-          if (type === "credit_card" && !luhnOk(text)) continue;
-          if (type === "ipv4" && !ipv4Ok(text.replace(/\s+/g, ""))) continue;
-          lineDetections.push({ type, text, bbox, confidence });
-        }
-      }
-    }
-    return lineDetections;
-  }
-
-  function unionBBoxes(bboxes: Array<{ x0: number; y0: number; x1: number; y1: number }>) {
-    return {
-      x0: Math.min(...bboxes.map((b) => b.x0)),
-      y0: Math.min(...bboxes.map((b) => b.y0)),
-      x1: Math.max(...bboxes.map((b) => b.x1)),
-      y1: Math.max(...bboxes.map((b) => b.y1)),
-    };
-  }
-
-  function overlapY(a: { y0: number; y1: number }, b: { y0: number; y1: number }) {
-    const top = Math.max(a.y0, b.y0);
-    const bottom = Math.min(a.y1, b.y1);
-    const inter = Math.max(0, bottom - top);
-    const height = Math.max(1, Math.min(a.y1 - a.y0, b.y1 - b.y0));
-    return inter / height;
-  }
-
-  function normalizeForType(s: string) {
-    return s
-      .replace(/\s*\(at\)\s*|\s*\[at\]\s*|\s*\{at\}\s*|\bat\b/gi, "@")
-      .replace(/\s*\(dot\)\s*|\s*\[dot\]\s*|\s*\{dot\}\s*|\bdot\b/gi, ".")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
 
   React.useEffect(() => {
     // Re-filter current candidates when slider changes
@@ -374,7 +315,7 @@ export default function ManualRedactor() {
     const filtered = filterDetections(lastCandidatesRef.current, canvasEl, minConfidence);
     setDetections(filtered);
     renderOverlayBoxes(filtered);
-  }, [minConfidence, zoom, setDetections]); // ADD zoom here
+  }, [minConfidence, zoom, setDetections, renderOverlayBoxes]);
 
   // Ensure overlay scales when zoom changes
   React.useEffect(() => {
@@ -382,7 +323,7 @@ export default function ManualRedactor() {
     if (!canvasEl) return;
     const filtered = filterDetections(lastCandidatesRef.current, canvasEl, minConfidence);
     renderOverlayBoxes(filtered);
-  }, [zoom, minConfidence]);
+  }, [zoom, minConfidence, renderOverlayBoxes]);
 
   // React to auto-detect toggle: clear overlays when disabled; when enabled, re-render or run OCR
   React.useEffect(() => {
@@ -397,7 +338,7 @@ export default function ManualRedactor() {
     if (lastCandidatesRef.current.length === 0) {
       runOcrAsync();
     }
-  }, [autoDetectEnabled, minConfidence, runOcrAsync]);
+  }, [autoDetectEnabled, minConfidence, runOcrAsync, renderOverlayBoxes]);
 
   function filterDetections(
     items: Array<{
@@ -451,45 +392,6 @@ export default function ManualRedactor() {
     });
   }
 
-  function renderOverlayBoxes(detections: Array<{ bbox: { x0: number; y0: number; x1: number; y1: number }, type: string, text: string }>) {
-    const overlayDiv = overlayDivRef.current;
-    const canvasEl = canvasRef.current;
-    if (!(overlayDiv && canvasEl)) return;
-    // If auto-detect is disabled, ensure overlay is cleared and skip drawing
-    if (!autoDetectEnabled) {
-      overlayDiv.innerHTML = "";
-      return;
-    }
-    // Clear existing boxes efficiently
-    overlayDiv.innerHTML = "";
-    
-    const canvasRect = canvasEl.getBoundingClientRect();
-    // IMPORTANT: Account for zoom level in scaling
-    const scaleX = (canvasRect.width / canvasEl.width) * zoom;
-    const scaleY = (canvasRect.height / canvasEl.height) * zoom;
-    
-    // Create a document fragment to avoid multiple DOM updates
-    const fragment = document.createDocumentFragment();
-    
-    detections.forEach((det) => {
-      const d = document.createElement("div");
-      d.style.position = "absolute";
-      d.style.left = `${det.bbox.x0 * scaleX}px`;
-      d.style.top = `${det.bbox.y0 * scaleY}px`;
-      d.style.width = `${(det.bbox.x1 - det.bbox.x0) * scaleX}px`;
-      d.style.height = `${(det.bbox.y1 - det.bbox.y0) * scaleY}px`;
-      d.style.border = "2px solid #22c55e";
-      d.style.background = "rgba(34,197,94,0.1)";
-      d.style.borderRadius = "4px";
-      d.style.pointerEvents = "none";
-      d.style.zIndex = "10";
-      d.title = `${det.type}: ${det.text}`;
-      fragment.appendChild(d);
-    });
-    
-    // Single DOM update
-    overlayDiv.appendChild(fragment);
-  }
   const applyEffect = (rect: SelectionRect, toolToApply: RedactionTool) => {
     const canvas = canvasRef.current;
     const ctx = get2d(canvas);
@@ -660,7 +562,6 @@ export default function ManualRedactor() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
           <div className="flex items-baseline gap-2">
             <h1 className="text-xl font-semibold text-blue-600">Screenshot Redactor</h1>
-            <span className="text-xs text-muted-foreground">Manual Redaction</span>
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>Privacy-first: all in your browser</span>
@@ -908,5 +809,3 @@ export default function ManualRedactor() {
     </div>
   );
 }
-
-

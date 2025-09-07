@@ -63,8 +63,7 @@ export default function DetectionPanel({ onFocusDetection, minConfidence, autoMo
         {TYPE_ORDER.map((t) => {
           const list = grouped[t] || [];
           if (list.length === 0) return null;
-          const acceptedCount = list.filter((d) => acceptedById[d.id]).length;
-          const openId = `group-${t}`;
+          // Removed unused variables: acceptedCount, openId
           return (
             <details key={t} open className="mb-2 rounded border bg-card">
               <summary className="flex cursor-pointer items-center justify-between px-3 py-2">

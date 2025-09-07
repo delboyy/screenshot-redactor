@@ -12,7 +12,7 @@ export type DetectionsState = {
   clear: () => void;
 };
 
-export const useDetections = create<DetectionsState>((set, get) => ({
+export const useDetections = create<DetectionsState>((set) => ({
   detections: [],
   grouped: {},
   acceptedById: {},

@@ -4,7 +4,11 @@ import React from "react";
 import Link from "next/link";
 import { useDetections } from "@/store/detections";
 import DetectionPanel from "@/components/redactor/DetectionPanel";
-import { detectBoxesFromCanvas, disposeDetectorWorker } from "@/lib/ocr/detectorClient";
+import { disposeDetectorWorker } from "@/lib/ocr/detectorClient";
+import AutoDetectPanel from "@/components/AutoDetectPanel";
+import type { Rect } from "@/lib/ocr/geom";
+import { assertIrreversible } from "@/lib/export/validate";
+import { devAssertNoMetadata } from "@/lib/export/metadata";
 
 type RedactionTool = "blackout" | "blur" | "pixelate";
 
@@ -30,11 +34,10 @@ export default function ManualRedactor() {
   const [stripExif, setStripExif] = React.useState(true);
   const [minConfidence, setMinConfidence] = React.useState(65);
   const [autoMode, setAutoMode] = React.useState<RedactionTool>("blackout");
-  const [autoDetectEnabled, setAutoDetectEnabled] = React.useState(false);
+  // legacy auto-detect toggle removed (AutoDetectPanel provides detection now)
 
   const undoStack = React.useRef<ImageData[]>([]);
   const redoStack = React.useRef<ImageData[]>([]);
-  const overlayDivRef = React.useRef<HTMLDivElement | null>(null);
   const { setDetections } = useDetections();
   type Candidate = {
     id: string;
@@ -44,7 +47,6 @@ export default function ManualRedactor() {
     bbox: { x0: number; y0: number; x1: number; y1: number };
   };
   const lastCandidatesRef = React.useRef<Candidate[]>([]);
-  const ocrRunningRef = React.useRef(false);
 
   const get2d = (c: HTMLCanvasElement | null) => c?.getContext("2d") || null;
 
@@ -62,93 +64,6 @@ export default function ManualRedactor() {
     }
   }, []);
 
-  // Memoized overlay renderer to avoid re-creation
-  const renderOverlayBoxes = React.useCallback((detections: Array<{ bbox: { x0: number; y0: number; x1: number; y1: number }, type: string, text: string }>) => {
-    const overlayDiv = overlayDivRef.current;
-    const canvasEl = canvasRef.current;
-    if (!(overlayDiv && canvasEl)) return;
-    if (!autoDetectEnabled) {
-      overlayDiv.innerHTML = "";
-      return;
-    }
-    overlayDiv.innerHTML = "";
-    const canvasRect = canvasEl.getBoundingClientRect();
-    const scaleX = (canvasRect.width / canvasEl.width) * zoom;
-    const scaleY = (canvasRect.height / canvasEl.height) * zoom;
-    const fragment = document.createDocumentFragment();
-    detections.forEach((det) => {
-      const d = document.createElement("div");
-      d.style.position = "absolute";
-      d.style.left = `${det.bbox.x0 * scaleX}px`;
-      d.style.top = `${det.bbox.y0 * scaleY}px`;
-      d.style.width = `${(det.bbox.x1 - det.bbox.x0) * scaleX}px`;
-      d.style.height = `${(det.bbox.y1 - det.bbox.y0) * scaleY}px`;
-      d.style.border = "2px solid #22c55e";
-      d.style.background = "rgba(34,197,94,0.1)";
-      d.style.borderRadius = "4px";
-      d.style.pointerEvents = "none";
-      d.style.zIndex = "10";
-      d.title = `${det.type}: ${det.text}`;
-      fragment.appendChild(d);
-    });
-    overlayDiv.appendChild(fragment);
-  }, [zoom, autoDetectEnabled]);
-
-  // OCR/detector integration (boxes-only, via worker)
-  const runOcrAsync = React.useCallback(async () => {
-    if (!autoDetectEnabled) {
-      if (overlayDivRef.current) overlayDivRef.current.innerHTML = "";
-      return;
-    }
-    if (ocrRunningRef.current) return;
-    ocrRunningRef.current = true;
-
-    // Show loading state
-    const overlayDiv = overlayDivRef.current;
-    if (overlayDiv) {
-      overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20;">Detecting boxes…</div>';
-    }
-
-    try {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-
-      // Use the current canvas directly to avoid expensive dataURL roundtrips
-      const boxes = await detectBoxesFromCanvas(canvas);
-
-      // Map polygons to axis-aligned boxes for overlay
-      const detections = boxes.map((poly, idx) => {
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (let i = 0; i < poly.length; i += 2) {
-          const x = poly[i];
-          const y = poly[i + 1];
-          if (x < minX) minX = x;
-          if (y < minY) minY = y;
-          if (x > maxX) maxX = x;
-          if (y > maxY) maxY = y;
-        }
-        return {
-          id: `box-${idx}`,
-          type: "auto",
-          text: "",
-          confidence: 80,
-          bbox: { x0: minX, y0: minY, x1: maxX, y1: maxY },
-        };
-      });
-
-      lastCandidatesRef.current = detections;
-      setDetections(detections);
-      renderOverlayBoxes(detections);
-    } catch (err) {
-      console.warn("Detector error:", err);
-      if (overlayDiv) {
-        overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(239, 68, 68, 0.9); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20; cursor: pointer;" onclick="this.remove()">Auto-detection failed. Click to dismiss and use manual tools.</div>';
-      }
-      setAutoDetectEnabled(false);
-    } finally {
-      ocrRunningRef.current = false;
-    }
-  }, [autoDetectEnabled, renderOverlayBoxes, setDetections]);
 
   // Initialize canvas with image
   const initializeCanvasWithImage = React.useCallback((img: HTMLImageElement) => {
@@ -197,9 +112,6 @@ export default function ManualRedactor() {
     imageRef.current = img;
     img.onload = () => {
       initializeCanvasWithImage(img);
-      if (autoDetectEnabled) {
-        runOcrAsync();
-      }
     };
     img.onerror = () => setError("Failed to load image.");
     img.src = dataUrl;
@@ -207,7 +119,7 @@ export default function ManualRedactor() {
     return () => {
       try { disposeDetectorWorker(); } catch {}
     };
-  }, [initializeCanvasWithImage, runOcrAsync, autoDetectEnabled]);
+  }, [initializeCanvasWithImage]);
 
   
 
@@ -308,89 +220,6 @@ export default function ManualRedactor() {
   };
 
 
-  React.useEffect(() => {
-    // Re-filter current candidates when slider changes
-    const canvasEl = canvasRef.current;
-    if (!canvasEl) return;
-    const filtered = filterDetections(lastCandidatesRef.current, canvasEl, minConfidence);
-    setDetections(filtered);
-    renderOverlayBoxes(filtered);
-  }, [minConfidence, zoom, setDetections, renderOverlayBoxes]);
-
-  // Ensure overlay scales when zoom changes
-  React.useEffect(() => {
-    const canvasEl = canvasRef.current;
-    if (!canvasEl) return;
-    const filtered = filterDetections(lastCandidatesRef.current, canvasEl, minConfidence);
-    renderOverlayBoxes(filtered);
-  }, [zoom, minConfidence, renderOverlayBoxes]);
-
-  // React to auto-detect toggle: clear overlays when disabled; when enabled, re-render or run OCR
-  React.useEffect(() => {
-    const canvasEl = canvasRef.current;
-    if (!canvasEl) return;
-    if (!autoDetectEnabled) {
-      if (overlayDivRef.current) overlayDivRef.current.innerHTML = "";
-      return;
-    }
-    const filtered = filterDetections(lastCandidatesRef.current, canvasEl, minConfidence);
-    renderOverlayBoxes(filtered);
-    if (lastCandidatesRef.current.length === 0) {
-      runOcrAsync();
-    }
-  }, [autoDetectEnabled, minConfidence, runOcrAsync, renderOverlayBoxes]);
-
-  function filterDetections(
-    items: Array<{
-      id: string;
-      type: string;
-      text: string;
-      confidence: number;
-      bbox: { x0: number; y0: number; x1: number; y1: number };
-    }>,
-    canvasEl: HTMLCanvasElement,
-    threshold: number
-  ) {
-    // use slider-provided threshold
-    const minConfidence = threshold; // 0-100
-    const width = canvasEl.width;
-    const height = canvasEl.height;
-    // Heuristic UI band to ignore (toolbar). Relax to 8% to avoid hitting content.
-    const ignoreTopPx = Math.floor(height * 0.08);
-
-    const withinUi = (b: { y0: number; y1: number }) => b.y1 < ignoreTopPx;
-
-    const lengthOk = (type: string, text: string) => {
-      const t = text.trim();
-      switch (type) {
-        case "email":
-          return t.length >= 6 && t.length <= 254;
-        case "url":
-          return t.length >= 8 && t.length <= 2083;
-        case "ipv4":
-          return t.length >= 7 && t.length <= 15;
-        case "phone":
-          return t.replace(/\D/g, "").length >= 7 && t.replace(/\D/g, "").length <= 15;
-        case "credit_card":
-          return t.replace(/\D/g, "").length >= 13 && t.replace(/\D/g, "").length <= 19;
-        case "name":
-          return t.length >= 3 && t.length <= 64;
-        default:
-          return true;
-      }
-    };
-
-    return items.filter((d) => {
-      if (d.confidence < minConfidence) return false;
-      if (!lengthOk(d.type, d.text)) return false;
-      if (withinUi(d.bbox)) return false;
-      // Discard extremely wide/flat boxes typical of rulers/menus
-      const w = d.bbox.x1 - d.bbox.x0;
-      const h = d.bbox.y1 - d.bbox.y0;
-      if (w > width * 0.9 && h < height * 0.02) return false;
-      return true;
-    });
-  }
 
   const applyEffect = (rect: SelectionRect, toolToApply: RedactionTool) => {
     const canvas = canvasRef.current;
@@ -400,6 +229,9 @@ export default function ManualRedactor() {
 
     pushUndoSnapshot();
     redoStack.current = [];
+
+    // Dev-only: capture before region for irreversibility checks
+    const before = (process.env.NODE_ENV === 'development') ? ctx.getImageData(rect.x, rect.y, rect.width, rect.height) : null;
 
     switch (toolToApply) {
       case "blackout": {
@@ -424,6 +256,17 @@ export default function ManualRedactor() {
         pixelate(ctx, rect.x, rect.y, rect.width, rect.height, 10);
         break;
       }
+    }
+
+    // Dev-only: validate irreversibility of the write
+    if (process.env.NODE_ENV === 'development' && before) {
+      try {
+        const after = ctx.getImageData(rect.x, rect.y, rect.width, rect.height);
+        const ok = assertIrreversible(before, after, toolToApply);
+        if (!ok) {
+          console.warn("Redaction irreversibility check failed for", toolToApply, rect);
+        }
+      } catch {}
     }
   };
 
@@ -497,36 +340,51 @@ export default function ManualRedactor() {
   };
 
   const handleExport = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    let mime = "image/png";
+    const src = canvasRef.current;
+    if (!src) return;
+    let mime: string = "image/png";
     let quality = 1;
-    if (format === "JPG") {
-      mime = "image/jpeg";
-      quality = 0.92;
-    } else if (format === "WEBP") {
-      mime = "image/webp";
-      quality = 0.92;
+    if (format === "JPG") { mime = "image/jpeg"; quality = 0.92; }
+    else if (format === "WEBP") { mime = "image/webp"; quality = 0.92; }
+
+    // Re-render into a fresh canvas (offscreen if available) to make the
+    // destructive, metadata-free re-encode explicit.
+    const w = src.width;
+    const h = src.height;
+    let blob: Blob | null = null;
+    if (typeof OffscreenCanvas !== "undefined") {
+      const off = new OffscreenCanvas(w, h);
+      const octx = off.getContext("2d");
+      if (!octx) return;
+      octx.drawImage(src, 0, 0);
+      blob = await off.convertToBlob({ type: mime, quality });
+    } else {
+      const tmp = document.createElement("canvas");
+      tmp.width = w;
+      tmp.height = h;
+      const tctx = tmp.getContext("2d");
+      if (!tctx) return;
+      tctx.drawImage(src, 0, 0);
+      blob = await new Promise<Blob>((resolve) => {
+        tmp.toBlob((b) => resolve(b || new Blob()), mime, quality);
+      });
     }
-    let dataUrl = canvas.toDataURL(mime, quality);
-    if (stripExif && mime === "image/jpeg") {
-      try {
-        const mod = await import("piexifjs");
-        const m = mod as unknown as { remove?: (s: string) => string; default?: { remove: (s: string) => string } };
-        const remover = m.remove ?? m.default?.remove;
-        if (remover) dataUrl = remover(dataUrl);
-      } catch (e) {
-        console.warn("EXIF strip failed:", e);
-      }
-    }
+    if (!blob) return;
+
+    // Dev-only: assert no common metadata markers present
+    await devAssertNoMetadata(blob, mime);
+
     const original = sessionStorage.getItem("sr:filename") || "screenshot";
     const base = original.replace(/\.[^.]+$/, "");
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = dataUrl;
+    a.href = url;
     a.download = `${base}-redacted.${format.toLowerCase()}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
+    URL.revokeObjectURL(url);
+
     // Success toast (simple inline)
     try {
       const div = document.createElement("div");
@@ -703,32 +561,12 @@ export default function ManualRedactor() {
               >
                 Redo
               </button>
-              <div className="ml-2 hidden items-center gap-2 md:flex">
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4"
-                    checked={autoDetectEnabled}
-                    onChange={(e) => setAutoDetectEnabled(e.target.checked)}
-                  />
-                  Auto Detect
-                </label>
-                <label className="text-xs text-muted-foreground">Min conf</label>
-                <input
-                  type="range"
-                  min={40}
-                  max={95}
-                  step={1}
-                  value={minConfidence}
-                  onChange={(e) => setMinConfidence(Number(e.target.value))}
-                />
-                <span className="text-xs w-8 text-right">{minConfidence}%</span>
-              </div>
+              {/* legacy auto-detect controls removed; use AutoDetectPanel */}
             </div>
           </div>
 
           {/* Canvas container */}
-          <div ref={containerRef} className="relative flex flex-1 items-center justify-center overflow-auto bg-[rgba(185,28,28,0.15)] p-2">
+          <div ref={containerRef} className="relative flex flex-1 items-center justify-center overflow-auto p-2">
             <div
               className="relative"
               style={{ transform: `scale(${zoom})`, transformOrigin: "center center" }}
@@ -741,7 +579,52 @@ export default function ManualRedactor() {
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}
               />
-              <div ref={overlayDivRef} className="pointer-events-none absolute left-0 top-0" />
+              {/* legacy auto-detect overlay removed (replaced by AutoDetectPanel) */}
+            </div>
+
+            {/* Progressive Auto-detect overlay and controls */}
+            <div className="absolute left-3 right-3 top-3 z-20">
+              <AutoDetectPanel
+                canvasRef={canvasRef}
+                onApply={(rects: Rect[]) => {
+                  const canvasEl = canvasRef.current;
+                  const ctx = get2d(canvasEl);
+                  if (!(canvasEl && ctx)) return;
+                  pushUndoSnapshot();
+                  for (const r of rects) {
+                    const before = (process.env.NODE_ENV === 'development') ? ctx.getImageData(r.x, r.y, r.width, r.height) : null;
+                    switch (tool) {
+                      case "blackout": {
+                        ctx.save();
+                        ctx.fillStyle = "#000";
+                        ctx.fillRect(r.x, r.y, r.width, r.height);
+                        ctx.restore();
+                        break;
+                      }
+                      case "blur": {
+                        const imageData = ctx.getImageData(r.x, r.y, r.width, r.height);
+                        let blurred = imageData;
+                        for (let i = 0; i < 2; i++) blurred = boxBlur(blurred, 10);
+                        ctx.putImageData(blurred, r.x, r.y);
+                        break;
+                      }
+                      case "pixelate": {
+                        pixelate(ctx, r.x, r.y, r.width, r.height, 10);
+                        break;
+                      }
+                    }
+                    if (process.env.NODE_ENV === 'development' && before) {
+                      try {
+                        const after = ctx.getImageData(r.x, r.y, r.width, r.height);
+                        const ok = assertIrreversible(before, after, tool);
+                        if (!ok) {
+                          console.warn("Redaction irreversibility check failed for", tool, r);
+                        }
+                      } catch {}
+                    }
+                  }
+                }}
+              />
             </div>
           </div>
 

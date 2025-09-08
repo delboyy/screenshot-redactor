@@ -3,8 +3,7 @@ declare module "@gutenye/ocr-browser" {
     detect(image: ImageBitmap): Promise<{ boxes: number[][] }>;
   };
   const Ocr: {
-    create(options?: any): Promise<Detector>;
+    create(options?: unknown): Promise<Detector>;
   };
   export default Ocr;
 }
-

@@ -46,9 +46,10 @@ self.onmessage = async (event: MessageEvent<InMsg>) => {
     self.postMessage(msg);
   } catch (e) {
     try {
-      imageBitmap?.close?.();
+      imageBitmap.close();
     } catch {}
-    const msg: OutErr = { id: (event.data as any)?.id ?? "", ok: false, error: (e as Error).message };
+    const fallbackId = (event?.data as InMsg | undefined)?.id ?? "";
+    const msg: OutErr = { id: fallbackId, ok: false, error: (e as Error).message };
     self.postMessage(msg);
   }
 };

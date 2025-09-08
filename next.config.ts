@@ -1,6 +1,17 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Minimal webpack fallbacks for browser builds to avoid bundling Node core deps
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+      };
+    }
+    return config;
+  },
   
   // Cross-Origin Isolation headers: keep enabled by default for Web Workers
   // These headers (COEP/COOP) enable cross-origin isolation, which is required

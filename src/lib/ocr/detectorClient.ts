@@ -52,12 +52,16 @@ function getWorker(): Worker {
     const err = new Error((ev as ErrorEvent)?.message || "Worker error");
     for (const [, p] of pending) p.reject(err);
     pending.clear();
+    try { workerInstance?.terminate(); } catch {}
+    workerInstance = null;
   };
 
-  workerInstance.onmessageerror = (ev) => {
+  workerInstance.onmessageerror = () => {
     const err = new Error("Worker message deserialization error");
     for (const [, p] of pending) p.reject(err);
     pending.clear();
+    try { workerInstance?.terminate(); } catch {}
+    workerInstance = null;
   };
 
   return workerInstance;
@@ -75,8 +79,8 @@ export async function detectBoxesFromCanvas(
   const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   // Dimensions
-  const origW = (canvas as any).width as number;
-  const origH = (canvas as any).height as number;
+  const origW = (canvas as HTMLCanvasElement | OffscreenCanvas).width;
+  const origH = (canvas as HTMLCanvasElement | OffscreenCanvas).height;
   const longEdge = Math.max(origW, origH) || 1;
   const needsDownscale = longEdge > longEdgePx;
   const scale = needsDownscale ? longEdgePx / longEdge : 1;
@@ -91,8 +95,10 @@ export async function detectBoxesFromCanvas(
       const ctx = tmp.getContext("2d") as OffscreenCanvasRenderingContext2D | null;
       if (!ctx) throw new Error("2D context unavailable for OffscreenCanvas");
       ctx.imageSmoothingEnabled = true;
-      try { (ctx as any).imageSmoothingQuality = "high"; } catch {}
-      ctx.drawImage(canvas as any, 0, 0, dsW, dsH);
+      if ("imageSmoothingQuality" in ctx) {
+        (ctx as OffscreenCanvasRenderingContext2D & { imageSmoothingQuality?: "low" | "medium" | "high" }).imageSmoothingQuality = "high";
+      }
+      ctx.drawImage(canvas as HTMLCanvasElement | OffscreenCanvas, 0, 0, dsW, dsH);
       sourceForBitmap = tmp;
     } else {
       const tmp = document.createElement("canvas");
@@ -101,13 +107,15 @@ export async function detectBoxesFromCanvas(
       const ctx = tmp.getContext("2d");
       if (!ctx) throw new Error("2D context unavailable for Canvas");
       ctx.imageSmoothingEnabled = true;
-      try { (ctx as any).imageSmoothingQuality = "high"; } catch {}
-      ctx.drawImage(canvas as any, 0, 0, dsW, dsH);
-      sourceForBitmap = tmp as unknown as HTMLCanvasElement;
+      if ("imageSmoothingQuality" in (ctx as CanvasRenderingContext2D)) {
+        (ctx as CanvasRenderingContext2D & { imageSmoothingQuality?: "low" | "medium" | "high" }).imageSmoothingQuality = "high";
+      }
+      ctx.drawImage(canvas as HTMLCanvasElement | OffscreenCanvas, 0, 0, dsW, dsH);
+      sourceForBitmap = tmp;
     }
   }
 
-  const imageBitmap = await createImageBitmap(sourceForBitmap as any);
+  const imageBitmap = await createImageBitmap(sourceForBitmap as HTMLCanvasElement | OffscreenCanvas);
   const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   return new Promise<Boxes>((resolve, reject) => {
@@ -146,7 +154,14 @@ export async function detectBoxesFromCanvas(
     });
 
     // Transfer the ImageBitmap to the worker to avoid cloning cost and free main-thread memory.
-    worker.postMessage({ id, imageBitmap }, [imageBitmap as unknown as Transferable]);
+    try {
+      worker.postMessage({ id, imageBitmap }, [imageBitmap as unknown as Transferable]);
+    } catch (e) {
+      // Ensure bitmap is closed on failure and promise is rejected
+      try { imageBitmap.close(); } catch {}
+      pending.delete(id);
+      reject(e);
+    }
   });
 }
 

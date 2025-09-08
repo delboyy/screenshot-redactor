@@ -32,13 +32,13 @@ export default function ManualRedactor() {
   const [zoom, setZoom] = React.useState(1);
   const [format, setFormat] = React.useState<"PNG" | "JPG" | "WEBP">("PNG");
   const [stripExif, setStripExif] = React.useState(true);
-  const [minConfidence, setMinConfidence] = React.useState(65);
+  const [minConfidence] = React.useState(65);
   const [autoMode, setAutoMode] = React.useState<RedactionTool>("blackout");
   // legacy auto-detect toggle removed (AutoDetectPanel provides detection now)
 
   const undoStack = React.useRef<ImageData[]>([]);
   const redoStack = React.useRef<ImageData[]>([]);
-  const { setDetections } = useDetections();
+  const { /* setDetections */ } = useDetections();
   type Candidate = {
     id: string;
     type: string;

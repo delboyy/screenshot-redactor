@@ -1,7 +1,5 @@
 export type SimpleImageData = { data: Uint8ClampedArray; width: number; height: number };
 
-function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
-
 // Compute grayscale luma for a pixel
 function luma(r: number, g: number, b: number): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -81,4 +79,3 @@ export function assertIrreversible(before: SimpleImageData, after: SimpleImageDa
     }
   }
 }
-

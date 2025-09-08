@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import Ocr from "@gutenye/ocr-browser";
+import Ocr, { type OcrCreateOptions } from "@gutenye/ocr-browser";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -57,11 +57,13 @@ async function ensureOcr() {
       // recognition not used, but preflight helps surface path issues early
       await preflight(baseOptions.models.recognitionPath, 'recognition model');
       await preflight(baseOptions.models.dictionaryPath, 'dictionary');
-      ocr = await Ocr.create({ backend: preferredBackend || "wasm", ...baseOptions } as any);
+      const opts: OcrCreateOptions = { backend: preferredBackend || "wasm", ...baseOptions };
+      ocr = await Ocr.create(opts);
     } catch (e) {
       if (preferredBackend && preferredBackend !== "wasm") {
         // Retry with WASM for cross-browser stability
-        ocr = await Ocr.create({ backend: "wasm", ...baseOptions } as any);
+        const fallbackOpts: OcrCreateOptions = { backend: "wasm", ...baseOptions };
+        ocr = await Ocr.create(fallbackOpts);
       } else {
         throw e;
       }

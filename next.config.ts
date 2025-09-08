@@ -13,25 +13,17 @@ const nextConfig: NextConfig = {
     return config;
   },
   
-  // Cross-Origin Isolation headers: keep enabled by default for Web Workers
-  // These headers (COEP/COOP) enable cross-origin isolation, which is required
-  // for features like SharedArrayBuffer and some WebAssembly SIMD paths.
-  // Tradeoff: they can block cross-origin iframes/resources unless those
-  // resources opt-in (e.g., via CORP/COEP). Disable with care if you rely on
-  // embedding third-party content that can’t be configured.
+  // Cross-origin isolation (COI) headers: enable only when explicitly requested.
+  // COI ON improves WASM performance (SIMD/SAB) but blocks cross-origin assets
+  // that do not set CORP/COEP.
   async headers() {
+    if (process.env.NEXT_PUBLIC_COI !== '1') return [];
     return [
       {
         source: '/(.*)',
         headers: [
-          {
-            key: 'Cross-Origin-Embedder-Policy',
-            value: 'require-corp',
-          },
-          {
-            key: 'Cross-Origin-Opener-Policy',
-            value: 'same-origin',
-          },
+          { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+          { key: 'Cross-Origin-Embedder-Policy', value: 'require-corp' },
         ],
       },
     ];

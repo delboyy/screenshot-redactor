@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "postinstall": "node scripts/copy-ocr-assets.mjs"
   },
   "dependencies": {
     "@gutenye/ocr-browser": "^1.4.8",

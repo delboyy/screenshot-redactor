@@ -25,7 +25,31 @@ let ocr: Awaited<ReturnType<typeof Ocr.create>> | null = null;
 
 async function ensureOcr() {
   if (!ocr) {
-    ocr = await Ocr.create({ backend: "wasm", det: true, rec: false });
+    // WASM default for Safari/WebKit stability. If a different backend is
+    // ever passed in (e.g., via debug overrides), catch and retry with WASM.
+    // Models hosted same-origin for COEP compatibility.
+    const baseOptions = {
+      det: true,
+      rec: false,
+      models: {
+        detectionPath: "/ocr-assets/ch_PP-OCRv4_det_infer.onnx",
+        recognitionPath: "/ocr-assets/ch_PP-OCRv4_rec_infer.onnx",
+        dictionaryPath: "/ocr-assets/ppocr_keys_v1.txt",
+      },
+    } as const;
+
+    const preferredBackend = (undefined as unknown) as string | undefined; // placeholder for future overrides
+
+    try {
+      ocr = await Ocr.create({ backend: preferredBackend || "wasm", ...baseOptions } as any);
+    } catch (e) {
+      if (preferredBackend && preferredBackend !== "wasm") {
+        // Retry with WASM for cross-browser stability
+        ocr = await Ocr.create({ backend: "wasm", ...baseOptions } as any);
+      } else {
+        throw e;
+      }
+    }
   }
   return ocr;
 }

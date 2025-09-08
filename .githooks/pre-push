@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[pre-push] Running local checks (typecheck + lint)"
+
+# Prefer pnpm if available, else npm
+if command -v pnpm >/dev/null 2>&1; then
+  PKG=pnpm
+else
+  PKG=npm
+fi
+
+$PKG run check
+
+echo "[pre-push] OK"
+

@@ -32,3 +32,4 @@ async function main() {
 main().catch((e) => {
   console.warn('[copy-ocr-assets] Failed:', e?.message || e);
 });
+/* eslint-disable no-console */

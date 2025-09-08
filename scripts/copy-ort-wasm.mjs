@@ -20,3 +20,4 @@ async function main() {
 }
 
 main().catch((e) => console.warn('[copy-ort-wasm] Failed:', e?.message || e));
+/* eslint-disable no-console */

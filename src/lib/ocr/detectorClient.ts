@@ -88,7 +88,7 @@ export async function detectBoxesFromCanvas(
   const dsH = Math.max(1, Math.round(origH * scale));
 
   // Stage log: start prepare/downscale
-  try { console.debug?.('S1:prepare_start'); } catch {}
+  devLog('S1:prepare_start');
 
   // Downscale to a temporary canvas if needed
   let sourceForBitmap: HTMLCanvasElement | OffscreenCanvas = canvas;
@@ -178,14 +178,14 @@ export async function detectBoxesFromCanvas(
   }
 
   const imageBitmap = await createBitmapSafe(sourceForBitmap as HTMLCanvasElement | OffscreenCanvas);
-  try { console.debug?.('S2:bitmap_ready', { dw: dsW, dh: dsH }); } catch {}
+  devLog('S2:bitmap_ready', { dw: dsW, dh: dsH });
   const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   return new Promise<Boxes>((resolve, reject) => {
     // Handle response: measure infer + scale timings and upscale polygons to original coordinates
     pending.set(id, {
       resolve: (boxes: Boxes) => {
-        try { console.debug?.('S4:result_received'); } catch {}
+        devLog('S4:result_received');
         const t2 = typeof performance !== "undefined" ? performance.now() : Date.now();
         const inv = 1 / (scale || 1);
         const s0 = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -219,7 +219,7 @@ export async function detectBoxesFromCanvas(
 
     // Transfer the ImageBitmap to the worker to avoid cloning cost and free main-thread memory.
     try {
-      try { console.debug?.('S3:post_to_worker'); } catch {}
+      devLog('S3:post_to_worker');
       worker.postMessage({ id, imageBitmap }, [imageBitmap as unknown as Transferable]);
     } catch (e) {
       // Ensure bitmap is closed on failure and promise is rejected

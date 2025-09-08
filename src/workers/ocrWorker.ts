@@ -2,6 +2,7 @@
 
 import Ocr, { type OcrCreateOptions } from "@gutenye/ocr-browser";
 import * as ort from 'onnxruntime-web';
+import { devLog } from "@/lib/dev";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -48,8 +49,8 @@ async function ensureReady(): Promise<void> {
   if (!initPromise) {
     initPromise = (async () => {
       // Log ORT version if available (debug only)
-      try { console.debug?.('W0:ort_version', (ort as unknown as { env?: { versions?: { common?: string } } })?.env?.versions?.common || 'unknown'); } catch {}
-      try { console.debug?.('W1:create_start'); } catch {}
+      devLog('W0:ort_version', (ort as unknown as { env?: { versions?: { common?: string } } })?.env?.versions?.common || 'unknown');
+      devLog('W1:create_start');
       // Polyfill minimal Image constructor in worker (some libs presence-check it)
       const g = self as unknown as { Image?: new () => unknown };
       if (typeof g.Image === 'undefined') {
@@ -136,7 +137,7 @@ async function ensureReady(): Promise<void> {
         const mod = (await import("@gutenye/ocr-common/build/models/Detection.js")) as unknown as DetectionModule;
         detector = await mod.Detection.create({ models: { detectionPath } });
         isReady = true;
-        try { console.debug?.('W2:create_ok'); } catch {}
+        devLog('W2:create_ok');
       } catch (e) {
         isReady = false;
         throw new Error(`create_failed@W1: ${(e as Error).message}`);
@@ -159,7 +160,7 @@ self.onmessage = async (event: MessageEvent<InMsg>) => {
     if (!id || !imageBitmap) throw new Error("Invalid message payload");
 
     await ensureReady();
-    try { console.debug?.('W3:detect_start'); } catch {}
+    devLog('W3:detect_start');
     let boxes: number[][];
     try {
       if (!detector) throw new Error('detector not initialized');
@@ -175,7 +176,7 @@ self.onmessage = async (event: MessageEvent<InMsg>) => {
     } catch (e) {
       throw new Error(`detect_failed@W3: ${(e as Error).message}`);
     }
-    try { console.debug?.('W4:detect_ok'); } catch {}
+    devLog('W4:detect_ok');
 
     try {
       imageBitmap.close();

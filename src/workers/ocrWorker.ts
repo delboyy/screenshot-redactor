@@ -23,6 +23,17 @@ type OutErr = {
 
 let ocr: Awaited<ReturnType<typeof Ocr.create>> | null = null;
 
+async function preflight(url: string, label: string) {
+  try {
+    const res = await fetch(url, { method: 'HEAD' });
+    if (!res.ok) {
+      throw new Error(`${label} not reachable: ${url} (${res.status})`);
+    }
+  } catch (e) {
+    throw new Error(`Model fetch failed for ${label}: ${url} :: ${(e as Error).message}`);
+  }
+}
+
 async function ensureOcr() {
   if (!ocr) {
     // WASM default for Safari/WebKit stability. If a different backend is
@@ -41,6 +52,11 @@ async function ensureOcr() {
     const preferredBackend = (undefined as unknown) as string | undefined; // placeholder for future overrides
 
     try {
+      // Preflight model availability with descriptive errors
+      await preflight(baseOptions.models.detectionPath, 'detection model');
+      // recognition not used, but preflight helps surface path issues early
+      await preflight(baseOptions.models.recognitionPath, 'recognition model');
+      await preflight(baseOptions.models.dictionaryPath, 'dictionary');
       ocr = await Ocr.create({ backend: preferredBackend || "wasm", ...baseOptions } as any);
     } catch (e) {
       if (preferredBackend && preferredBackend !== "wasm") {

@@ -1,6 +1,5 @@
 /// <reference lib="webworker" />
 
-import Ocr, { type OcrCreateOptions } from "@gutenye/ocr-browser";
 import * as ort from 'onnxruntime-web';
 import { devLog } from "@/lib/dev";
 
@@ -23,8 +22,6 @@ type OutErr = {
   error: string;
 };
 
-let ocr: Awaited<ReturnType<typeof Ocr.create>> | null = null; // legacy reference; not used after detector-only switch
-
 type DetectionLike = {
   run(input: ImageBitmap | OffscreenCanvas | HTMLCanvasElement): Promise<Array<{ box: number[][] }>>;
 };
@@ -45,7 +42,7 @@ async function preflight(url: string, label: string) {
 }
 
 async function ensureReady(): Promise<void> {
-  if (isReady && ocr) return;
+  if (isReady && detector) return;
   if (!initPromise) {
     initPromise = (async () => {
       // Log ORT version if available (debug only)
@@ -120,7 +117,7 @@ async function ensureReady(): Promise<void> {
       } catch {}
 
       // Minimal document polyfill for canvas creation inside ImageRaw in workers
-      const gdoc = (self as unknown as { document?: { createElement?: (tag: string) => any } });
+      const gdoc = (self as unknown as { document?: { createElement?: (tag: string) => HTMLCanvasElement | OffscreenCanvas } });
       if (!gdoc.document) {
         gdoc.document = {
           createElement: (tag: string) => {
@@ -149,7 +146,7 @@ async function ensureReady(): Promise<void> {
     });
   }
   await initPromise;
-  if (!isReady || !ocr) {
+  if (!isReady || !detector) {
     throw new Error('create_failed@W1: not ready after init');
   }
 }

@@ -38,13 +38,15 @@ async function preflight(url: string, label: string) {
 async function ensureOcr() {
   if (!ocr) {
     // Polyfill minimal Image constructor in worker (some libs presence-check it)
-    if (typeof (self as any).Image === 'undefined') {
-      (self as any).Image = class {};
+    const g = self as unknown as { Image?: new () => unknown };
+    if (typeof g.Image === 'undefined') {
+      const NoopImage = class {} as unknown as new () => unknown;
+      g.Image = NoopImage;
     }
 
     // Point ORT to same-origin wasm binaries to ensure they load under COEP
     try {
-      (ort as any).env.wasm.wasmPaths = '/onnx/';
+      ort.env.wasm.wasmPaths = '/onnx/';
     } catch {}
     // WASM default for Safari/WebKit stability. If a different backend is
     // ever passed in (e.g., via debug overrides), catch and retry with WASM.
@@ -59,7 +61,7 @@ async function ensureOcr() {
       },
     } as const;
 
-    const preferredBackend = (undefined as unknown) as string | undefined; // placeholder for future overrides
+    const preferredBackend: string | undefined = undefined; // placeholder for future overrides
 
     try {
       // Preflight model availability with descriptive errors

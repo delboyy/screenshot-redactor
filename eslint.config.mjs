@@ -10,6 +10,17 @@ const compat = new FlatCompat({
 });
 
 const eslintConfig = [
+  // Ignore generated and vendor assets
+  {
+    ignores: [
+      "node_modules/**",
+      ".next/**",
+      "public/ocr-assets/**",
+      "public/onnx/**",
+      "dist/**",
+      "coverage/**",
+    ],
+  },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
 ];
 

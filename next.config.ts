@@ -2,7 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   // Minimal webpack fallbacks for browser builds to avoid bundling Node core deps
-  webpack: (config, { isServer }) => {
+  // Loosen parameter typing here to keep standalone typecheck simple
+  webpack: (config: any, { isServer }: { isServer: boolean }) => {
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,

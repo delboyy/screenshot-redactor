@@ -87,6 +87,9 @@ export async function detectBoxesFromCanvas(
   const dsW = Math.max(1, Math.round(origW * scale));
   const dsH = Math.max(1, Math.round(origH * scale));
 
+  // Stage log: start prepare/downscale
+  try { console.debug?.('S1:prepare_start'); } catch {}
+
   // Downscale to a temporary canvas if needed
   let sourceForBitmap: HTMLCanvasElement | OffscreenCanvas = canvas;
   if (needsDownscale) {
@@ -115,13 +118,74 @@ export async function detectBoxesFromCanvas(
     }
   }
 
-  const imageBitmap = await createImageBitmap(sourceForBitmap as HTMLCanvasElement | OffscreenCanvas);
+  // Robust ImageBitmap creation without HTMLImageElement.decode() or WebCodecs
+  async function toBlobFromCanvas(c: HTMLCanvasElement | OffscreenCanvas): Promise<Blob> {
+    // Prefer OffscreenCanvas.convertToBlob
+    if ("convertToBlob" in (c as OffscreenCanvas)) {
+      return await (c as OffscreenCanvas).convertToBlob({ type: "image/png", quality: 0.92 });
+    }
+    // HTMLCanvasElement.toBlob
+    const html = c as HTMLCanvasElement;
+    if (typeof html.toBlob === "function") {
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        try {
+          html.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))), "image/png", 0.92);
+        } catch (e) {
+          reject(e);
+        }
+      });
+      if (!blob) throw new Error("toBlob failed");
+      return blob;
+    }
+    // Last-resort: dataURL -> Blob
+    const dataUrl = (c as HTMLCanvasElement).toDataURL("image/png", 0.92);
+    const res = await fetch(dataUrl);
+    return await res.blob();
+  }
+
+  async function createBitmapSafe(c: HTMLCanvasElement | OffscreenCanvas): Promise<ImageBitmap> {
+    // 1) Try direct createImageBitmap(canvas)
+    try {
+      return await createImageBitmap(c as HTMLCanvasElement | OffscreenCanvas);
+    } catch {}
+    // 2) toBlob() -> createImageBitmap(blob)
+    try {
+      const blob = await toBlobFromCanvas(c);
+      return await createImageBitmap(blob);
+    } catch {}
+    // 3) Last resort: draw via <img> without decode(); then createImageBitmap(temp)
+    const dataUrl = (c as HTMLCanvasElement).toDataURL("image/png", 0.92);
+    await new Promise<void>((resolve, reject) => {
+      try {
+        const img = new Image();
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("Image load failed"));
+        img.src = dataUrl;
+      } catch (e) {
+        reject(e);
+      }
+    });
+    const temp = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(c.width as number, c.height as number) : (() => {
+      const t = document.createElement("canvas");
+      t.width = (c as HTMLCanvasElement | OffscreenCanvas).width as number;
+      t.height = (c as HTMLCanvasElement | OffscreenCanvas).height as number;
+      return t;
+    })();
+    const tctx = temp.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    if (!tctx) throw new Error("2D context unavailable for temp canvas");
+    tctx.drawImage(c as HTMLCanvasElement | OffscreenCanvas, 0, 0);
+    return await createImageBitmap(temp as HTMLCanvasElement | OffscreenCanvas);
+  }
+
+  const imageBitmap = await createBitmapSafe(sourceForBitmap as HTMLCanvasElement | OffscreenCanvas);
+  try { console.debug?.('S2:bitmap_ready', { dw: dsW, dh: dsH }); } catch {}
   const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   return new Promise<Boxes>((resolve, reject) => {
     // Handle response: measure infer + scale timings and upscale polygons to original coordinates
     pending.set(id, {
       resolve: (boxes: Boxes) => {
+        try { console.debug?.('S4:result_received'); } catch {}
         const t2 = typeof performance !== "undefined" ? performance.now() : Date.now();
         const inv = 1 / (scale || 1);
         const s0 = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -155,6 +219,7 @@ export async function detectBoxesFromCanvas(
 
     // Transfer the ImageBitmap to the worker to avoid cloning cost and free main-thread memory.
     try {
+      try { console.debug?.('S3:post_to_worker'); } catch {}
       worker.postMessage({ id, imageBitmap }, [imageBitmap as unknown as Transferable]);
     } catch (e) {
       // Ensure bitmap is closed on failure and promise is rejected

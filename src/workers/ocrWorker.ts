@@ -37,6 +37,7 @@ async function preflight(url: string, label: string) {
 
 async function ensureOcr() {
   if (!ocr) {
+    try { console.debug?.('W1:create_start'); } catch {}
     // Polyfill minimal Image constructor in worker (some libs presence-check it)
     const g = self as unknown as { Image?: new () => unknown };
     if (typeof g.Image === 'undefined') {
@@ -50,48 +51,48 @@ async function ensureOcr() {
     } catch {}
 
     // Backend stability across environments
-    // - Preview (no COI): enforce single-threaded WASM to avoid threaded assets
-    // - Production (COI on): allow small, safe multi-threading for speed
+    // Preview (no COI): enforce single-threaded WASM to avoid threaded assets
+    // Production (COI on): allow small, safe multi-threading for speed
     try {
       const coiEnabled = typeof process !== 'undefined' && process.env.NEXT_PUBLIC_COI === '1';
       if (coiEnabled) {
-        const hc = (typeof navigator !== 'undefined' && (navigator as unknown as { hardwareConcurrency?: number }).hardwareConcurrency) || 1;
-        ort.env.wasm.numThreads = Math.min(4, hc || 1);
+        const hc = (typeof navigator !== 'undefined' && (navigator as unknown as { hardwareConcurrency?: number }).hardwareConcurrency) || 2;
+        ort.env.wasm.numThreads = Math.min(4, hc || 2);
       } else {
         ort.env.wasm.numThreads = 1;
         ort.env.wasm.proxy = false;
       }
     } catch {}
-    // WASM default for Safari/WebKit stability. If a different backend is
-    // ever passed in (e.g., via debug overrides), catch and retry with WASM.
-    // Models hosted same-origin for COEP compatibility.
+    // WASM default for Safari/WebKit stability. Models hosted same-origin for COEP compatibility.
+    // Detector-only; recognition disabled to avoid extra assets.
     const baseOptions = {
       det: true,
       rec: false,
       models: {
         detectionPath: "/ocr-assets/ch_PP-OCRv4_det_infer.onnx",
-        recognitionPath: "/ocr-assets/ch_PP-OCRv4_rec_infer.onnx",
-        dictionaryPath: "/ocr-assets/ppocr_keys_v1.txt",
       },
     } as const;
 
     const preferredBackend: string | undefined = "wasm"; // Always prefer WASM backend
 
     try {
-      // Preflight model availability with descriptive errors
+      // Preflight model availability with descriptive errors (detector only)
       await preflight(baseOptions.models.detectionPath, 'detection model');
-      // recognition not used, but preflight helps surface path issues early
-      await preflight(baseOptions.models.recognitionPath, 'recognition model');
-      await preflight(baseOptions.models.dictionaryPath, 'dictionary');
-      const opts: OcrCreateOptions = { backend: preferredBackend || "wasm", ...baseOptions };
+      const opts = ({ backend: preferredBackend || "wasm", ...baseOptions } as unknown as OcrCreateOptions);
       ocr = await Ocr.create(opts);
+      try { console.debug?.('W2:create_ok'); } catch {}
     } catch (e) {
       if (preferredBackend && preferredBackend !== "wasm") {
         // Retry with WASM for cross-browser stability
-        const fallbackOpts: OcrCreateOptions = { backend: "wasm", ...baseOptions };
-        ocr = await Ocr.create(fallbackOpts);
+        try {
+          const fallbackOpts = ({ backend: "wasm", ...baseOptions } as unknown as OcrCreateOptions);
+          ocr = await Ocr.create(fallbackOpts);
+          try { console.debug?.('W2:create_ok'); } catch {}
+        } catch (e2) {
+          throw new Error(`create_failed@W1: ${(e2 as Error).message}`);
+        }
       } else {
-        throw e;
+        throw new Error(`create_failed@W1: ${(e as Error).message}`);
       }
     }
   }
@@ -104,7 +105,14 @@ self.onmessage = async (event: MessageEvent<InMsg>) => {
     if (!id || !imageBitmap) throw new Error("Invalid message payload");
 
     const inst = await ensureOcr();
-    const { boxes } = await inst.detect(imageBitmap as unknown as ImageBitmap);
+    try { console.debug?.('W3:detect_start'); } catch {}
+    let boxes: number[][];
+    try {
+      ({ boxes } = await inst.detect(imageBitmap as unknown as ImageBitmap));
+    } catch (e) {
+      throw new Error(`detect_failed@W3: ${(e as Error).message}`);
+    }
+    try { console.debug?.('W4:detect_ok'); } catch {}
 
     try {
       imageBitmap.close();

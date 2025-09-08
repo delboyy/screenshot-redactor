@@ -16,7 +16,9 @@ const eslintConfig = [
       "node_modules/**",
       ".next/**",
       "public/ocr-assets/**",
+      // legacy folders (removed in heuristic-only build)
       "public/ort/**",
+      "public/ocr-assets/**",
       "dist/**",
       "coverage/**",
     ],

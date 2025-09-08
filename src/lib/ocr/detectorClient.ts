@@ -3,6 +3,7 @@
 
 type Boxes = number[][]; // polygon as [x1,y1,x2,y2,...]
 import { devLog } from "@/lib/dev";
+import { HeuristicTextDetector, type TextDetectorProvider } from "@/lib/ocr/provider";
 
 export type DetectOptions = {
   longEdgePx?: number; // Downscale so max(width,height) === longEdgePx (if larger)
@@ -17,8 +18,8 @@ type Pending = {
   reject: (err: unknown) => void;
 };
 
-let workerInstance: Worker | null = null;
-const pending = new Map<string, Pending>();
+// Simplified: run detection on main thread via a provider (heuristic by default)
+let provider: TextDetectorProvider | null = null;
 
 function genId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -27,51 +28,18 @@ function genId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function getWorker(): Worker {
-  if (workerInstance) return workerInstance;
-  if (typeof window === "undefined") {
-    throw new Error("ocr detector worker can only be used in the browser");
+async function getProvider(): Promise<TextDetectorProvider> {
+  if (!provider) {
+    provider = new HeuristicTextDetector();
+    await provider.init();
   }
-  // Create a module worker referencing the TS source; Next/Turbopack resolves this via bundler URL handling.
-  workerInstance = new Worker(new URL("../../workers/ocrWorker.ts", import.meta.url), { type: "module" });
-
-  workerInstance.onmessage = (ev: MessageEvent<WorkerOk | WorkerErr>) => {
-    const data = ev.data as WorkerOk | WorkerErr;
-    const entry = pending.get(data.id);
-    if (!entry) return; // unknown or already handled
-    pending.delete(data.id);
-    if (data.ok) {
-      entry.resolve(data.boxes);
-    } else {
-      entry.reject(new Error(data.error));
-    }
-  };
-
-  workerInstance.onerror = (ev) => {
-    // Propagate a generic error to all pending requests, then reset the worker.
-    const err = new Error((ev as ErrorEvent)?.message || "Worker error");
-    for (const [, p] of pending) p.reject(err);
-    pending.clear();
-    try { workerInstance?.terminate(); } catch {}
-    workerInstance = null;
-  };
-
-  workerInstance.onmessageerror = () => {
-    const err = new Error("Worker message deserialization error");
-    for (const [, p] of pending) p.reject(err);
-    pending.clear();
-    try { workerInstance?.terminate(); } catch {}
-    workerInstance = null;
-  };
-
-  return workerInstance;
+  return provider;
 }
 
 export async function detectBoxesFromCanvas(
   canvas: HTMLCanvasElement | OffscreenCanvas,
   opts: DetectOptions = {}
 ): Promise<Boxes> {
-  const worker = getWorker();
   const id = genId();
 
   const { longEdgePx = 1280, timing = true } = opts;
@@ -181,64 +149,40 @@ export async function detectBoxesFromCanvas(
   devLog('S2:bitmap_ready', { dw: dsW, dh: dsH });
   const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
-  return new Promise<Boxes>((resolve, reject) => {
-    // Handle response: measure infer + scale timings and upscale polygons to original coordinates
-    pending.set(id, {
-      resolve: (boxes: Boxes) => {
-        devLog('S4:result_received');
-        const t2 = typeof performance !== "undefined" ? performance.now() : Date.now();
-        const inv = 1 / (scale || 1);
-        const s0 = typeof performance !== "undefined" ? performance.now() : Date.now();
-        const scaled = boxes.map((poly) => {
-          if (!needsDownscale || scale === 1) return poly.slice();
-          const out: number[] = new Array(poly.length);
-          for (let i = 0; i < poly.length; i += 2) {
-            out[i] = poly[i] * inv;
-            out[i + 1] = poly[i + 1] * inv;
-          }
-          return out;
-        });
-        const s1 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const prov = await getProvider();
+  devLog('S3:post_to_worker');
+  // Use provider; it expects original coordinates and optional downscale instruction
+  const polys = await prov.detect(imageBitmap, { longEdgePx, sensitivity: 'med' });
+  devLog('S4:result_received');
 
-        if (timing) {
-          // Pretty, compact timing log
-          // prepare = downscale + bitmap, infer = worker roundtrip, scale = polygon scaling, total = end-start
-          const prepare = (t1 as number) - (t0 as number);
-          const infer = (t2 as number) - (t1 as number);
-          const scaleTime = (s1 as number) - (s0 as number);
-          const total = (s1 as number) - (t0 as number);
-          devLog(
-            `[detector] ${origW}x${origH} -> ${dsW}x${dsH} (x${(inv).toFixed(2)}) | prep ${prepare.toFixed(1)}ms, infer ${infer.toFixed(1)}ms, scale ${scaleTime.toFixed(1)}ms, total ${total.toFixed(1)}ms`
-          );
+  // If we downscaled before preparing ImageBitmap (we didn’t: we drew canvas at dsW,dsH then created bitmap from it)
+  // we would need to scale back. Here, provider already returns ORIGINAL coords.
+  const t2 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const inv = 1 / (scale || 1);
+  const s0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const scaled = (!needsDownscale || scale === 1)
+    ? polys
+    : polys.map((poly) => {
+        const out: number[] = new Array(poly.length);
+        for (let i = 0; i < poly.length; i += 2) {
+          out[i] = poly[i] * inv;
+          out[i + 1] = poly[i + 1] * inv;
         }
-
-        resolve(scaled);
-      },
-      reject,
-    });
-
-    // Transfer the ImageBitmap to the worker to avoid cloning cost and free main-thread memory.
-    try {
-      devLog('S3:post_to_worker');
-      worker.postMessage({ id, imageBitmap }, [imageBitmap as unknown as Transferable]);
-    } catch (e) {
-      // Ensure bitmap is closed on failure and promise is rejected
-      try { imageBitmap.close(); } catch {}
-      pending.delete(id);
-      reject(e);
-    }
-  });
+        return out;
+      });
+  const s1 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  if (timing) {
+    const prepare = (t1 as number) - (t0 as number);
+    const infer = (t2 as number) - (t1 as number);
+    const scaleTime = (s1 as number) - (s0 as number);
+    const total = (s1 as number) - (t0 as number);
+    devLog(`[detector] ${origW}x${origH} -> ${dsW}x${dsH} (x${(inv).toFixed(2)}) | prep ${prepare.toFixed(1)}ms, infer ${infer.toFixed(1)}ms, scale ${scaleTime.toFixed(1)}ms, total ${total.toFixed(1)}ms`);
+  }
+  return scaled;
 }
 
 export function disposeDetectorWorker(): void {
-  if (workerInstance) {
-    try { workerInstance.terminate(); } catch {}
-    workerInstance = null;
-  }
-  // Reject any outstanding requests to avoid hanging promises.
-  const err = new Error("Worker disposed");
-  for (const [, p] of pending) p.reject(err);
-  pending.clear();
+  provider = null;
 }
 
 export {};

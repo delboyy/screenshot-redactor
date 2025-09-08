@@ -12,8 +12,7 @@ Privacy-first, entirely client-side redaction. Now with “Auto-detect text (bet
 ### How It Works
 - Frontend-only Next.js app with TypeScript
 - Canvas-based redactions (pixels overwritten on the client)
-- Detector-only OCR (no recognition) via `@gutenye/ocr-browser` + `onnxruntime-web` in a module Web Worker
-- Detector assets are copied to `public/ocr-assets` and ORT runtime files (.wasm/.mjs) to `public/ort` at postinstall
+- Lightweight, local-only text box suggestion using a heuristic detector (no ONNX, no web workers required)
 
 ### Getting Started
 Prereqs: Node 18+ (LTS), pnpm or npm
@@ -21,7 +20,7 @@ Prereqs: Node 18+ (LTS), pnpm or npm
 Install deps and copy model/runtime assets:
 ```bash
 npm install
-# postinstall runs: scripts/copy-ocr-assets.mjs and scripts/copy-ort-wasm.mjs
+<!-- No postinstall needed for detector assets -->
 ```
 
 Run the app:
@@ -72,7 +71,7 @@ npm start
 - Postinstall scripts copy detector and ORT assets to `public/` for same-origin loading.
 
 ### Troubleshooting
-- “Auto-detect failed…”: Ensure postinstall copied assets to `public/ocr-assets` and `public/ort`.
+- “Auto-detect failed…”: Try reloading the page; the heuristic runs locally without extra assets.
 - If detection is slow on first run: model cold start; warm runs are faster.
 - COEP errors: disable COI (`NEXT_PUBLIC_COI` unset) or host all assets same-origin with proper CORP headers.
 

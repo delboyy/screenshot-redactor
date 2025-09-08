@@ -2,6 +2,12 @@
 // Creates a singleton Worker and manages request/response correlation.
 
 type Boxes = number[][]; // polygon as [x1,y1,x2,y2,...]
+import { devLog } from "@/lib/dev";
+
+export type DetectOptions = {
+  longEdgePx?: number; // Downscale so max(width,height) === longEdgePx (if larger)
+  timing?: boolean; // Log timings in development
+};
 
 type WorkerOk = { id: string; ok: true; boxes: Boxes };
 type WorkerErr = { id: string; ok: false; error: string };
@@ -58,14 +64,87 @@ function getWorker(): Worker {
 }
 
 export async function detectBoxesFromCanvas(
-  canvas: HTMLCanvasElement | OffscreenCanvas
+  canvas: HTMLCanvasElement | OffscreenCanvas,
+  opts: DetectOptions = {}
 ): Promise<Boxes> {
   const worker = getWorker();
   const id = genId();
-  const imageBitmap = await createImageBitmap(canvas as any);
+
+  const { longEdgePx = 1280, timing = true } = opts;
+
+  const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+
+  // Dimensions
+  const origW = (canvas as any).width as number;
+  const origH = (canvas as any).height as number;
+  const longEdge = Math.max(origW, origH) || 1;
+  const needsDownscale = longEdge > longEdgePx;
+  const scale = needsDownscale ? longEdgePx / longEdge : 1;
+  const dsW = Math.max(1, Math.round(origW * scale));
+  const dsH = Math.max(1, Math.round(origH * scale));
+
+  // Downscale to a temporary canvas if needed
+  let sourceForBitmap: HTMLCanvasElement | OffscreenCanvas = canvas;
+  if (needsDownscale) {
+    if (typeof OffscreenCanvas !== "undefined") {
+      const tmp = new OffscreenCanvas(dsW, dsH);
+      const ctx = tmp.getContext("2d") as OffscreenCanvasRenderingContext2D | null;
+      if (!ctx) throw new Error("2D context unavailable for OffscreenCanvas");
+      ctx.imageSmoothingEnabled = true;
+      try { (ctx as any).imageSmoothingQuality = "high"; } catch {}
+      ctx.drawImage(canvas as any, 0, 0, dsW, dsH);
+      sourceForBitmap = tmp;
+    } else {
+      const tmp = document.createElement("canvas");
+      tmp.width = dsW;
+      tmp.height = dsH;
+      const ctx = tmp.getContext("2d");
+      if (!ctx) throw new Error("2D context unavailable for Canvas");
+      ctx.imageSmoothingEnabled = true;
+      try { (ctx as any).imageSmoothingQuality = "high"; } catch {}
+      ctx.drawImage(canvas as any, 0, 0, dsW, dsH);
+      sourceForBitmap = tmp as unknown as HTMLCanvasElement;
+    }
+  }
+
+  const imageBitmap = await createImageBitmap(sourceForBitmap as any);
+  const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   return new Promise<Boxes>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    // Handle response: measure infer + scale timings and upscale polygons to original coordinates
+    pending.set(id, {
+      resolve: (boxes: Boxes) => {
+        const t2 = typeof performance !== "undefined" ? performance.now() : Date.now();
+        const inv = 1 / (scale || 1);
+        const s0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+        const scaled = boxes.map((poly) => {
+          if (!needsDownscale || scale === 1) return poly.slice();
+          const out: number[] = new Array(poly.length);
+          for (let i = 0; i < poly.length; i += 2) {
+            out[i] = poly[i] * inv;
+            out[i + 1] = poly[i + 1] * inv;
+          }
+          return out;
+        });
+        const s1 = typeof performance !== "undefined" ? performance.now() : Date.now();
+
+        if (timing) {
+          // Pretty, compact timing log
+          // prepare = downscale + bitmap, infer = worker roundtrip, scale = polygon scaling, total = end-start
+          const prepare = (t1 as number) - (t0 as number);
+          const infer = (t2 as number) - (t1 as number);
+          const scaleTime = (s1 as number) - (s0 as number);
+          const total = (s1 as number) - (t0 as number);
+          devLog(
+            `[detector] ${origW}x${origH} -> ${dsW}x${dsH} (x${(inv).toFixed(2)}) | prep ${prepare.toFixed(1)}ms, infer ${infer.toFixed(1)}ms, scale ${scaleTime.toFixed(1)}ms, total ${total.toFixed(1)}ms`
+          );
+        }
+
+        resolve(scaled);
+      },
+      reject,
+    });
+
     // Transfer the ImageBitmap to the worker to avoid cloning cost and free main-thread memory.
     worker.postMessage({ id, imageBitmap }, [imageBitmap as unknown as Transferable]);
   });
@@ -83,4 +162,3 @@ export function disposeDetectorWorker(): void {
 }
 
 export {};
-

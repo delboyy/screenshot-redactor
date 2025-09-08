@@ -23,7 +23,12 @@ type OutErr = {
 };
 
 let ocr: Awaited<ReturnType<typeof Ocr.create>> | null = null; // legacy reference; not used after detector-only switch
-let detector: any | null = null;
+
+type DetectionLike = {
+  run(input: ImageBitmap | OffscreenCanvas | HTMLCanvasElement): Promise<Array<{ box: number[][] }>>;
+};
+
+let detector: DetectionLike | null = null;
 let initPromise: Promise<void> | null = null;
 let isReady = false;
 
@@ -77,26 +82,39 @@ async function ensureReady(): Promise<void> {
       // Patch ImageRaw.open so Detection.run() can accept ImageBitmap/Canvas without decode()
       try {
         const backend = await import("@gutenye/ocr-common/build/backend/backend.js");
-        const BackendImageRaw = (backend as any).ImageRaw;
-        const originalOpen = (BackendImageRaw as { open: (input: unknown) => Promise<unknown> }).open;
-        (BackendImageRaw as { open: (input: unknown) => Promise<unknown> }).open = async (input: unknown) => {
+        type BackendModule = { ImageRaw: new (args: { data: Uint8ClampedArray; width: number; height: number }) => unknown };
+        const BackendImageRaw = (backend as BackendModule).ImageRaw;
+        const originalOpen = (BackendImageRaw as unknown as { open: (input: unknown) => Promise<unknown> }).open;
+
+        function isImageBitmapLike(x: unknown): x is ImageBitmap {
+          return !!x && typeof x === 'object' && 'width' in (x as Record<string, unknown>) && 'height' in (x as Record<string, unknown>) && 'close' in (x as Record<string, unknown>);
+        }
+        function isCanvasLike(x: unknown): x is HTMLCanvasElement | OffscreenCanvas {
+          return !!x && typeof x === 'object' && 'getContext' in (x as Record<string, unknown>);
+        }
+
+        (BackendImageRaw as unknown as { open: (input: unknown) => Promise<unknown> }).open = async (input: unknown) => {
           // Accept ImageBitmap or Canvas paths directly in the worker
-          const looksLikeBitmap = !!input && typeof input === 'object' && 'width' in (input as any) && 'height' in (input as any) && 'close' in (input as any);
-          const looksLikeCanvas = !!input && typeof input === 'object' && 'getContext' in (input as any);
-          if (looksLikeBitmap || looksLikeCanvas) {
-            const w = (input as any).width as number;
-            const h = (input as any).height as number;
-            const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : (() => { const c = (self as any).document?.createElement?.('canvas'); c.width = w; c.height = h; return c; })();
+          if (isImageBitmapLike(input) || isCanvasLike(input)) {
+            const w = (input as ImageBitmap | HTMLCanvasElement | OffscreenCanvas).width as number;
+            const h = (input as ImageBitmap | HTMLCanvasElement | OffscreenCanvas).height as number;
+            const canvas = typeof OffscreenCanvas !== 'undefined'
+              ? new OffscreenCanvas(w, h)
+              : (() => {
+                  const doc = (self as unknown as { document?: { createElement?: (tag: string) => HTMLCanvasElement } }).document;
+                  const c = doc?.createElement?.('canvas');
+                  if (!c) throw new Error('document not available to create canvas');
+                  c.width = w; c.height = h; return c;
+                })();
             const ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
             if (!ctx) throw new Error('2D context unavailable in worker');
-            ctx.drawImage(input as any, 0, 0);
+            ctx.drawImage(input as unknown as CanvasImageSource, 0, 0);
             const imageData = ctx.getImageData(0, 0, w, h);
             // Construct a new backend ImageRaw instance from pixel data
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            return new (BackendImageRaw as any)({ data: imageData.data, width: imageData.width, height: imageData.height });
+            return new BackendImageRaw({ data: imageData.data, width: imageData.width, height: imageData.height });
           }
           // Fallback to original behavior (string URL etc.)
-          return await originalOpen.call(BackendImageRaw, input as any);
+          return await originalOpen.call(BackendImageRaw, input as unknown as Parameters<typeof originalOpen>[0]);
         };
       } catch {}
 
@@ -114,9 +132,9 @@ async function ensureReady(): Promise<void> {
       try {
         // Preflight model availability with descriptive errors (detector only)
         await preflight(detectionPath, 'detection model');
-        const mod = await import("@gutenye/ocr-common/build/models/Detection.js");
-        const DetectionCtor = (mod as any).Detection;
-        detector = await DetectionCtor.create({ models: { detectionPath } });
+        type DetectionModule = { Detection: { create: (opts: { models: { detectionPath: string } }) => Promise<DetectionLike> } };
+        const mod = (await import("@gutenye/ocr-common/build/models/Detection.js")) as unknown as DetectionModule;
+        detector = await mod.Detection.create({ models: { detectionPath } });
         isReady = true;
         try { console.debug?.('W2:create_ok'); } catch {}
       } catch (e) {
@@ -146,14 +164,14 @@ self.onmessage = async (event: MessageEvent<InMsg>) => {
     try {
       if (!detector) throw new Error('detector not initialized');
       const lineImages = await detector.run(imageBitmap as unknown as ImageBitmap);
-      boxes = (lineImages as any[]).map((li) => {
-        const b = li?.box as number[][];
+      boxes = (lineImages as Array<{ box: number[][] }>).map((li) => {
+        const b = li?.box;
         if (!Array.isArray(b)) return [];
         // flatten [[x,y],...] -> [x,y,...]
         const out: number[] = [];
         for (const p of b) { out.push(Number(p[0]) || 0, Number(p[1]) || 0); }
         return out;
-      }).filter((p: number[]) => p.length >= 8);
+      }).filter((p) => p.length >= 8);
     } catch (e) {
       throw new Error(`detect_failed@W3: ${(e as Error).message}`);
     }

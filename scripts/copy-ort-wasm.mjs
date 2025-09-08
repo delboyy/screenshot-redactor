@@ -14,9 +14,9 @@ async function main() {
     console.warn('[copy-ort-wasm] source dir missing:', e?.message || e);
     return;
   }
-  const assets = files.filter((f) => /\.(wasm|mjs)$/i.test(f));
-  await Promise.all(assets.map((f) => fs.copyFile(path.join(srcDir, f), path.join(dstDir, f))));
-  console.log(`[copy-ort-wasm] Copied ${assets.length} ORT assets (.wasm/.mjs) to /public/ort`);
+  // Copy ALL files from dist to keep versions aligned (js, mjs, map, wasm, etc.)
+  await Promise.all(files.map((f) => fs.copyFile(path.join(srcDir, f), path.join(dstDir, f))));
+  console.log(`[copy-ort-wasm] Copied ${files.length} ORT dist files to /public/ort`);
 }
 
 main().catch((e) => console.warn('[copy-ort-wasm] Failed:', e?.message || e));

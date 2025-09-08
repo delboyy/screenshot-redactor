@@ -6,6 +6,7 @@ declare module "onnxruntime-web" {
       numThreads?: number;
       proxy?: boolean;
     };
+    versions?: { common?: string };
   };
   const mod: unknown;
   export default mod;

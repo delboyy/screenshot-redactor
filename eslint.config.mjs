@@ -22,6 +22,13 @@ const eslintConfig = [
     ],
   },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
+  // Relax rules for declaration files and config shims
+  {
+    files: ["**/*.d.ts", "src/types/**", "next.config.ts"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+    },
+  },
 ];
 
 export default eslintConfig;

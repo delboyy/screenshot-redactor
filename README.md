@@ -1,24 +1,80 @@
 ## Screenshot Redactor
 
-Manual redaction MVP — privacy-first, entirely client-side.
+Privacy-first, entirely client-side redaction. Now with “Auto-detect text (beta)” powered by a lightweight detector running in a Web Worker.
 
-Features
-- Drag/drop/paste image upload
-- Manual rectangle selection
-- Redaction tools: Black bar, Blur (strong), Pixelate
-- Undo/Redo history
-- Export PNG/JPG/WEBP with optional EXIF stripping (JPEG)
+### Features
+- Upload via drag/drop, click, or paste from clipboard
+- Manual rectangle selection with Undo/Redo
+- Redaction tools: Black bar, Blur, Pixelate (destructive pixel writes)
+- Auto-detect text (beta): suggest boxes, tweak padding/merge, apply
+- Export PNG/JPG/WEBP; JPEG EXIF stripping supported
 
-Tech
-- Next.js 14/15 + TypeScript + Tailwind
-- HTML5 Canvas (direct pixel writes)
-- `piexifjs` for EXIF removal (lazy-loaded)
+### How It Works
+- Frontend-only Next.js app with TypeScript
+- Canvas-based redactions (pixels overwritten on the client)
+- Detector-only OCR (no recognition) via `@gutenye/ocr-browser` + `onnxruntime-web` in a module Web Worker
+- Detector assets are copied to `public/ocr-assets` and ORT wasm to `public/onnx` at postinstall
 
-Local dev
+### Getting Started
+Prereqs: Node 18+ (LTS), pnpm or npm
+
+Install deps and copy model/runtime assets:
 ```bash
 npm install
+# postinstall runs: scripts/copy-ocr-assets.mjs and scripts/copy-ort-wasm.mjs
+```
+
+Run the app:
+```bash
 npm run dev
 ```
 
-Privacy
-- All processing happens in your browser. No image uploads.
+Type check and lint locally:
+```bash
+npm run typecheck   # standalone tsc over app code
+npm run lint:ci     # eslint flat-config, no warnings allowed
+```
+
+Build for production:
+```bash
+npm run build
+npm start
+```
+
+### Environment & Headers
+- By default, we do not enable cross-origin isolation. To opt in (for potential WASM performance features), set:
+  - `NEXT_PUBLIC_COI=1` (adds COOP/COEP headers). Ensure all assets are same-origin or CORP-enabled.
+
+### Auto‑Detect Text (Beta)
+- The UI panel appears above the canvas. Click “Auto-detect text (beta)” to run detection in a Web Worker.
+- Tune padding (0–12 px) and optionally merge nearby boxes by distance/IoU.
+- Apply uses the currently selected redaction tool (Black/Blur/Pixelate) for each suggested box.
+
+### Export Hardening
+- Exports are rendered from the canvas into a fresh buffer (PNG/JPEG/WEBP), so redactions are baked into pixels.
+- Optional EXIF stripping for JPEG via `piexifjs`.
+- In development, we run lightweight irreversibility checks and warn if a tool looks reversible.
+
+### Notable Files
+- Worker + detector client
+  - `src/workers/ocrWorker.ts` — detector-only OCR worker (loads once, re-used)
+  - `src/lib/ocr/detectorClient.ts` — downscales, transfers `ImageBitmap`, correlates responses
+- Geometry & overlays
+  - `src/lib/ocr/geom.ts` — polygon→rect, inflate, NMS/merge (unit tests included)
+  - `src/components/AutoDetectPanel.tsx` — detection UI and overlay
+- Redaction & export
+  - `src/components/redactor/ManualRedactor.tsx` — canvas tools, apply effects, export
+  - `src/lib/export/validate.ts` — dev-only irreversibility checks
+  - `src/lib/export/metadata.ts` — dev-only metadata marker checks
+
+### CI / Vercel
+- Vercel `buildCommand` runs `npm run typecheck && npm run lint:ci && next build` to fail fast on types/lint.
+- Postinstall scripts copy detector and ORT assets to `public/` for same-origin loading.
+
+### Troubleshooting
+- “Auto-detect failed…”: Ensure postinstall copied assets to `public/ocr-assets` and `public/onnx`.
+- If detection is slow on first run: model cold start; warm runs are faster.
+- COEP errors: disable COI (`NEXT_PUBLIC_COI` unset) or host all assets same-origin with proper CORP headers.
+
+### Privacy
+All processing stays in your browser. No image uploads or analytics by default.

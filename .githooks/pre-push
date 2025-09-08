@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[pre-push] Running local checks (typecheck + lint)"
+echo "[pre-push] Running local checks"
 
 # Prefer pnpm if available, else npm
 if command -v pnpm >/dev/null 2>&1; then
@@ -10,7 +10,24 @@ else
   PKG=npm
 fi
 
-$PKG run check
+# 1) Typecheck
+$PKG run typecheck
+
+# 2) Lint: try strict ESLint first, fall back to `next lint` if parser missing
+echo "[pre-push] Linting (strict)"
+set +e
+ESLINT_OUTPUT=$($PKG run lint:ci 2>&1)
+ESLINT_STATUS=$?
+set -e
+if [ $ESLINT_STATUS -ne 0 ]; then
+  if echo "$ESLINT_OUTPUT" | grep -q "next/dist/compiled/babel/eslint-parser"; then
+    echo "[pre-push] Falling back to Next lint"
+    $PKG run lint
+  else
+    echo "$ESLINT_OUTPUT"
+    echo "[pre-push] Lint failed"
+    exit 1
+  fi
+fi
 
 echo "[pre-push] OK"
-

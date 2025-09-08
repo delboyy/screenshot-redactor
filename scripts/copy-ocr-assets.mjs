@@ -13,7 +13,7 @@ async function main() {
   let entries = [];
   try {
     entries = await fs.readdir(srcDir);
-  } catch (e) {
+  } catch {
     // Models not present (e.g., partial install) — no-op
     return;
   }
@@ -26,12 +26,9 @@ async function main() {
       await fs.copyFile(from, to);
     })
   );
-  // eslint-disable-next-line no-console
   console.log(`[copy-ocr-assets] Copied ${copyList.length} files to /public/ocr-assets`);
 }
 
 main().catch((e) => {
-  // eslint-disable-next-line no-console
   console.warn('[copy-ocr-assets] Failed:', e?.message || e);
 });
-

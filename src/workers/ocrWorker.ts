@@ -44,9 +44,23 @@ async function ensureOcr() {
       g.Image = NoopImage;
     }
 
-    // Point ORT to same-origin wasm binaries to ensure they load under COEP
+    // Serve ORT runtime assets from same-origin /ort/ so COEP works later (SAB/SIMD builds)
     try {
-      ort.env.wasm.wasmPaths = '/onnx/';
+      ort.env.wasm.wasmPaths = '/ort/';
+    } catch {}
+
+    // Backend stability across environments
+    // - Preview (no COI): enforce single-threaded WASM to avoid threaded assets
+    // - Production (COI on): allow small, safe multi-threading for speed
+    try {
+      const coiEnabled = typeof process !== 'undefined' && process.env.NEXT_PUBLIC_COI === '1';
+      if (coiEnabled) {
+        const hc = (typeof navigator !== 'undefined' && (navigator as unknown as { hardwareConcurrency?: number }).hardwareConcurrency) || 1;
+        ort.env.wasm.numThreads = Math.min(4, hc || 1);
+      } else {
+        ort.env.wasm.numThreads = 1;
+        ort.env.wasm.proxy = false;
+      }
     } catch {}
     // WASM default for Safari/WebKit stability. If a different backend is
     // ever passed in (e.g., via debug overrides), catch and retry with WASM.
@@ -61,7 +75,7 @@ async function ensureOcr() {
       },
     } as const;
 
-    const preferredBackend: string | undefined = undefined; // placeholder for future overrides
+    const preferredBackend: string | undefined = "wasm"; // Always prefer WASM backend
 
     try {
       // Preflight model availability with descriptive errors

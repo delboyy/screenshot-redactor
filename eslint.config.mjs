@@ -16,7 +16,7 @@ const eslintConfig = [
       "node_modules/**",
       ".next/**",
       "public/ocr-assets/**",
-      "public/onnx/**",
+      "public/ort/**",
       "dist/**",
       "coverage/**",
     ],

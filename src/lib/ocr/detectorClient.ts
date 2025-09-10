@@ -49,7 +49,7 @@ function getWorker(): Worker {
 
   workerInstance.onerror = (_ev) => {
     // Propagate a generic error to all pending requests, then reset the worker.
-    const err = new Error((ev as ErrorEvent)?.message || "Worker error");
+    const err = new Error(((_ev as unknown) as ErrorEvent)?.message || "Worker error");
     for (const [, p] of pending) p.reject(err);
     pending.clear();
   };

@@ -47,14 +47,14 @@ function getWorker(): Worker {
     }
   };
 
-  workerInstance.onerror = (ev) => {
+  workerInstance.onerror = (_ev) => {
     // Propagate a generic error to all pending requests, then reset the worker.
     const err = new Error((ev as ErrorEvent)?.message || "Worker error");
     for (const [, p] of pending) p.reject(err);
     pending.clear();
   };
 
-  workerInstance.onmessageerror = (ev) => {
+  workerInstance.onmessageerror = (_ev) => {
     const err = new Error("Worker message deserialization error");
     for (const [, p] of pending) p.reject(err);
     pending.clear();
@@ -75,8 +75,8 @@ export async function detectBoxesFromCanvas(
   const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   // Dimensions
-  const origW = (canvas as any).width as number;
-  const origH = (canvas as any).height as number;
+  const origW = canvas.width as number;
+  const origH = canvas.height as number;
   const longEdge = Math.max(origW, origH) || 1;
   const needsDownscale = longEdge > longEdgePx;
   const scale = needsDownscale ? longEdgePx / longEdge : 1;
@@ -84,16 +84,16 @@ export async function detectBoxesFromCanvas(
   const dsH = Math.max(1, Math.round(origH * scale));
 
   // Downscale to a temporary canvas if needed
-  let sourceForBitmap: HTMLCanvasElement | OffscreenCanvas = canvas;
+  let sourceForBitmap: CanvasImageSource = canvas as CanvasImageSource;
   if (needsDownscale) {
     if (typeof OffscreenCanvas !== "undefined") {
       const tmp = new OffscreenCanvas(dsW, dsH);
       const ctx = tmp.getContext("2d") as OffscreenCanvasRenderingContext2D | null;
       if (!ctx) throw new Error("2D context unavailable for OffscreenCanvas");
       ctx.imageSmoothingEnabled = true;
-      try { (ctx as any).imageSmoothingQuality = "high"; } catch {}
-      ctx.drawImage(canvas as any, 0, 0, dsW, dsH);
-      sourceForBitmap = tmp;
+      try { ctx.imageSmoothingQuality = "high"; } catch {}
+      ctx.drawImage(canvas as unknown as CanvasImageSource, 0, 0, dsW, dsH);
+      sourceForBitmap = tmp as unknown as CanvasImageSource;
     } else {
       const tmp = document.createElement("canvas");
       tmp.width = dsW;
@@ -101,13 +101,13 @@ export async function detectBoxesFromCanvas(
       const ctx = tmp.getContext("2d");
       if (!ctx) throw new Error("2D context unavailable for Canvas");
       ctx.imageSmoothingEnabled = true;
-      try { (ctx as any).imageSmoothingQuality = "high"; } catch {}
-      ctx.drawImage(canvas as any, 0, 0, dsW, dsH);
-      sourceForBitmap = tmp as unknown as HTMLCanvasElement;
+      try { (ctx as CanvasRenderingContext2D).imageSmoothingQuality = "high"; } catch {}
+      ctx.drawImage(canvas as unknown as CanvasImageSource, 0, 0, dsW, dsH);
+      sourceForBitmap = tmp as unknown as CanvasImageSource;
     }
   }
 
-  const imageBitmap = await createImageBitmap(sourceForBitmap as any);
+  const imageBitmap = await createImageBitmap(sourceForBitmap as ImageBitmapSource);
   const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   return new Promise<Boxes>((resolve, reject) => {

@@ -3,8 +3,10 @@
 import React from "react";
 import Link from "next/link";
 import { useDetections } from "@/store/detections";
+import { pipelineBasic, pipelineHighContrast, pipelineForPii } from "@/lib/imagePreprocess";
+// Removed unused imports: luhnOk, ipv4Ok, unionBBoxes
 import DetectionPanel from "@/components/redactor/DetectionPanel";
-import { detectBoxesFromCanvas, disposeDetectorWorker } from "@/lib/ocr/detectorClient";
+import { processOcrForDetections } from "@/lib/enhanced_detection";
 
 type RedactionTool = "blackout" | "blur" | "pixelate";
 
@@ -94,7 +96,7 @@ export default function ManualRedactor() {
     overlayDiv.appendChild(fragment);
   }, [zoom, autoDetectEnabled]);
 
-  // OCR/detector integration (boxes-only, via worker)
+  // OCR integration (define before effects to satisfy hook dependencies)
   const runOcrAsync = React.useCallback(async () => {
     if (!autoDetectEnabled) {
       if (overlayDivRef.current) overlayDivRef.current.innerHTML = "";
@@ -102,53 +104,125 @@ export default function ManualRedactor() {
     }
     if (ocrRunningRef.current) return;
     ocrRunningRef.current = true;
-
+    
     // Show loading state
     const overlayDiv = overlayDivRef.current;
     if (overlayDiv) {
-      overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20;">Detecting boxes…</div>';
+      overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20;">Initializing OCR...</div>';
     }
-
+    
     try {
       const canvas = canvasRef.current;
       if (!canvas) return;
+      const pass1 = pipelineBasic(canvas);
+      const pass2 = pipelineHighContrast(canvas);
+      const pass3 = pipelineForPii(canvas); // Add the new PII-specific preprocessing
+      const dataUrl1 = pass1.canvas.toDataURL("image/png");
+      const dataUrl2 = pass2.canvas.toDataURL("image/png");
+      const dataUrl3 = pass3.canvas.toDataURL("image/png"); // New PII-optimized image
 
-      // Use the current canvas directly to avoid expensive dataURL roundtrips
-      const boxes = await detectBoxesFromCanvas(canvas);
+      const initWorkerWithRetry = async () => {
+        // Use only the default worker loading approach for better deployment compatibility
+        try {
+          console.log("Initializing OCR worker with default strategy...");
+          const mod = new URL("../../workers/ocrWorker.ts", import.meta.url);
+          const WorkerCtor = new Worker(mod, { type: "module" });
 
-      // Map polygons to axis-aligned boxes for overlay
-      const detections = boxes.map((poly, idx) => {
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (let i = 0; i < poly.length; i += 2) {
-          const x = poly[i];
-          const y = poly[i + 1];
-          if (x < minX) minX = x;
-          if (y < minY) minY = y;
-          if (x > maxX) maxX = x;
-          if (y > maxY) maxY = y;
+          // Update loading message
+          const overlayDiv = overlayDivRef.current;
+          if (overlayDiv) {
+            overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20;">Initializing OCR... (default method)</div>';
+          }
+
+          // Wait for worker to be ready with reasonable timeout
+          await new Promise<void>((resolve, reject) => {
+            const onMessage = (ev: MessageEvent) => {
+              if (ev.data?.type === "ready") {
+                WorkerCtor.removeEventListener("message", onMessage);
+                resolve();
+              }
+            };
+            WorkerCtor.addEventListener("message", onMessage);
+            WorkerCtor.postMessage({ type: "init" });
+            
+            // Reduced timeout for deployment environments
+            setTimeout(() => {
+              WorkerCtor.removeEventListener("message", onMessage);
+              reject(new Error("OCR initialization timeout - network conditions may be affecting loading"));
+            }, 45000); // 45 seconds instead of 150
+          });
+
+          return WorkerCtor;
+        } catch (error: unknown) {
+          console.error("OCR worker initialization failed:", error);
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          throw new Error(`OCR initialization failed: ${errorMessage}. Please try manual redaction or refresh the page.`);
         }
-        return {
-          id: `box-${idx}`,
-          type: "auto",
-          text: "",
-          confidence: 80,
-          bbox: { x0: minX, y0: minY, x1: maxX, y1: maxY },
+      };
+
+      const WorkerCtor = await initWorkerWithRetry();
+
+      const runOnce = (payloadUrl: string) => new Promise<{ ocr: { width: number; height: number; scaleX: number; scaleY: number; lines: Array<{ words: Array<{ text: string; conf: number; bbox: { x: number; y: number; w: number; h: number } }>; joined: string; spans: { start: number; end: number; wordIdx: number }[]; meanCharWidth: number }> } }>((resolve, reject) => {
+        const onMessage = (ev: MessageEvent) => {
+          if (ev.data?.type === "result") {
+            WorkerCtor.removeEventListener("message", onMessage);
+            resolve(ev.data.payload);
+          } else if (ev.data?.type === "error") {
+            WorkerCtor.removeEventListener("message", onMessage);
+            reject(new Error(ev.data.payload.message));
+          }
         };
+        WorkerCtor.addEventListener("message", onMessage);
+        WorkerCtor.postMessage({ type: "run", payload: { imageBitmapDataURL: payloadUrl } });
       });
 
-      lastCandidatesRef.current = detections;
-      setDetections(detections);
-      renderOverlayBoxes(detections);
-    } catch (err) {
-      console.warn("Detector error:", err);
-      if (overlayDiv) {
-        overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(239, 68, 68, 0.9); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20; cursor: pointer;" onclick="this.remove()">Auto-detection failed. Click to dismiss and use manual tools.</div>';
+      // Try all three preprocessing approaches
+      let payload = await runOnce(dataUrl1);
+      if (!payload || payload.ocr.lines.length < 1) {
+        payload = await runOnce(dataUrl2);
       }
+      // Try the PII-optimized preprocessing as a last resort
+      if (!payload || payload.ocr.lines.length < 1) {
+        payload = await runOnce(dataUrl3);
+      }
+
+      const detectionsMapped = processOcrForDetections(payload.ocr, minConfidence);
+      const candidates = detectionsMapped.map(d => ({
+        id: d.id,
+        type: d.type,
+        text: d.text,
+        confidence: d.confidence,
+        bbox: { x0: d.bbox.x0, y0: d.bbox.y0, x1: d.bbox.x1, y1: d.bbox.y1 },
+      }));
+      lastCandidatesRef.current = candidates;
+      setDetections(detectionsMapped);
+      renderOverlayBoxes(detectionsMapped);
+
+      // Cleanup worker and free memory
+      try {
+        WorkerCtor.terminate();
+        // Force garbage collection if available (mainly for development)
+        if (typeof window !== 'undefined' && 'gc' in window) {
+          (window as typeof window & { gc: () => void }).gc();
+        }
+      } catch (cleanupError) {
+        console.warn("Worker cleanup failed:", cleanupError);
+      }
+    } catch (err) {
+      console.warn("OCR error:", err);
+      
+      // Show error message to user and disable auto-detect
+      const overlayDiv = overlayDivRef.current;
+      if (overlayDiv) {
+        overlayDiv.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; background: rgba(239, 68, 68, 0.9); color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; z-index: 20; cursor: pointer;" onclick="this.remove()">Auto-detection failed to initialize. Click to dismiss and use manual tools.</div>';
+      }
+      
+      // Automatically disable auto-detect if it fails
       setAutoDetectEnabled(false);
     } finally {
       ocrRunningRef.current = false;
     }
-  }, [autoDetectEnabled, renderOverlayBoxes, setDetections]);
+  }, [setDetections, minConfidence, autoDetectEnabled, renderOverlayBoxes]);
 
   // Initialize canvas with image
   const initializeCanvasWithImage = React.useCallback((img: HTMLImageElement) => {
@@ -204,9 +278,6 @@ export default function ManualRedactor() {
     img.onerror = () => setError("Failed to load image.");
     img.src = dataUrl;
     redoStack.current = [];
-    return () => {
-      try { disposeDetectorWorker(); } catch {}
-    };
   }, [initializeCanvasWithImage, runOcrAsync, autoDetectEnabled]);
 
   
@@ -809,3 +880,5 @@ export default function ManualRedactor() {
     </div>
   );
 }
+
+
